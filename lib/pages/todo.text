@@ -1,0 +1,122 @@
+// Add this to your class variables at the top
+late PolylineAnnotationManager polylineAnnotationManager;
+
+// Update your _onMapCreated method to include polyline manager
+Future<void> _onMapCreated(MapboxMap mapboxMap) async {
+  _mapboxMap = mapboxMap;
+  pointAnnotationManager = await _mapboxMap.annotations.createPointAnnotationManager();
+  
+  // Add this line to create polyline annotation manager
+  polylineAnnotationManager = await _mapboxMap.annotations.createPolylineAnnotationManager();
+
+  _mapboxMap.location.updateSettings(
+    LocationComponentSettings(
+      enabled: true,
+      pulsingEnabled: true,
+      showAccuracyRing: true,
+      locationPuck: LocationPuck(
+        locationPuck2D: LocationPuck2D(),
+      ),
+    ),
+  );
+
+  await _getCurrentPosition();
+}
+
+// Fix your drawRoute method
+Future<void> drawRoute(List<Point> routePoints) async {
+  // Clear existing polylines first
+  await polylineAnnotationManager.deleteAll();
+  
+  // Create polyline annotation options
+  final polylineAnnotationOptions = PolylineAnnotationOptions(
+    geometry: LineString(coordinates: routePoints),
+    lineColor: Colors.blue.value, // Convert Color to int
+    lineWidth: 5.0,
+  );
+  
+  // Create the polyline on the map
+  await polylineAnnotationManager.create(polylineAnnotationOptions);
+}
+
+// Example of how to use it - add this method to demonstrate route drawing
+Future<void> _drawRouteFromCurrentToDestination(double destLat, double destLng) async {
+  if (_currentPosition == null) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Current location not available')),
+    );
+    return;
+  }
+
+  try {
+    // Get route points
+    final routePoints = await _getroute(
+      _currentPosition!.latitude,
+      _currentPosition!.longitude,
+      destLat,
+      destLng,
+    );
+    
+    // Draw the route on the map
+    await drawRoute(routePoints);
+    
+    // Optionally, add markers for start and end points
+    await pointAnnotationManager.deleteAll();
+    
+    // Start point marker
+    await pointAnnotationManager.create(PointAnnotationOptions(
+      geometry: Point(coordinates: Position(_currentPosition!.longitude, _currentPosition!.latitude)),
+      textField: "Start",
+      textSize: 12.0,
+    ));
+    
+    // End point marker
+    await pointAnnotationManager.create(PointAnnotationOptions(
+      geometry: Point(coordinates: Position(destLng, destLat)),
+      textField: "Destination",
+      textSize: 12.0,
+    ));
+    
+  } catch (e) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Failed to draw route: $e')),
+    );
+  }
+}
+
+// Update your _onSuggestionSelected method to draw route
+Future<void> _onSuggestionSelected(dynamic suggestion) async {
+  final coordinates = suggestion['geometry']['coordinates'];
+  final latitude = coordinates[1];
+  final longitude = coordinates[0];
+
+  _mapboxMap.flyTo(
+    CameraOptions(
+      center: Point(coordinates: Position(longitude, latitude)),
+      zoom: 15.0,
+    ),
+    MapAnimationOptions(duration: 1000),
+  );
+
+  // Clear previous annotations
+  await pointAnnotationManager.deleteAll();
+  
+  // Add marker for the selected suggestion
+  final pointAnnotationOptions = PointAnnotationOptions(
+    geometry: Point(coordinates: Position(longitude, latitude)),
+    textField: suggestion['place_name'],
+    textSize: 12.0,
+  );
+  await pointAnnotationManager.create(pointAnnotationOptions);
+
+  // Draw route from current location to selected destination
+  if (_currentPosition != null) {
+    await _drawRouteFromCurrentToDestination(latitude, longitude);
+  }
+
+  // Clear suggestions after selection
+  setState(() {
+    _suggestions = [];
+    _searchController.text = suggestion['place_name'];
+  });
+}
