@@ -1,6 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
+import 'dart:typed_data';
+import 'package:flutter/services.dart';
 import 'package:mapbox_maps_flutter/mapbox_maps_flutter.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:geolocator/geolocator.dart' as geo;
@@ -17,14 +20,16 @@ class _MainscreenState extends State<Mainscreen> {
   MapboxMap? _mapboxMap;
   geo.Position? _currentPosition;
   final TextEditingController _searchController = TextEditingController();
-  List<dynamic> _suggestions = [];
   final TextEditingController _searchNavigationController =
       TextEditingController();
+  List<dynamic> _suggestions = [];
 
   PointAnnotationManager? pointAnnotationManager;
   PolylineAnnotationManager? polylineAnnotationManager;
-
   StreamSubscription? userpositionStream;
+
+  bool _isMapReady = false;
+  bool _areCustomImagesLoaded = false;
 
   @override
   void initState() {
@@ -41,7 +46,80 @@ class _MainscreenState extends State<Mainscreen> {
     super.dispose();
   }
 
-  // Add this method to handle searching based on the query
+  // Load custom images into map style
+  Future<void> _addCustomImageToStyle({
+    required String imageId,
+    required String assetPath,
+    double scale = 1.0,
+    double displayScale = 1.0,
+  }) async {
+    if (_mapboxMap?.style == null) {
+      print("Map style not ready for image: $imageId");
+      return;
+    }
+
+    try {
+      final ByteData bytes = await rootBundle.load(assetPath);
+      final Uint8List imageData = bytes.buffer.asUint8List();
+
+      // Decode the image to get actual dimensions
+      final ui.Image decodedImage = await decodeImageFromList(imageData);
+
+      final mbxImage = MbxImage(
+        width: decodedImage.width, // Use actual width
+        height: decodedImage.height, // Use actual height
+        data: imageData,
+      );
+
+      await _mapboxMap!.style.addStyleImage(
+        imageId,
+        scale * displayScale, // Use display scale for rendering
+        mbxImage,
+        false, // sdf
+        [], // stretchX
+        [], // stretchY
+        null, // content
+      );
+
+      print(
+        "✅ Custom image '$imageId' loaded successfully (${decodedImage.width}x${decodedImage.height})",
+      );
+
+      // Clean up
+      decodedImage.dispose();
+    } catch (e) {
+      print("❌ Error loading image '$imageId': $e");
+    }
+  }
+
+  // Load all custom images
+  Future<void> _loadAllCustomImages() async {
+    try {
+      await Future.wait([
+        _addCustomImageToStyle(
+          imageId: "custom-marker",
+          assetPath: "assets/icons/marker.png",
+          displayScale: 0.2,
+        ),
+        _addCustomImageToStyle(
+          imageId: "destination-marker",
+          assetPath: "assets/icons/destination_marker.png",
+        ),
+        _addCustomImageToStyle(
+          imageId: "current-location-marker",
+          assetPath: "assets/icons/current_location_marker.png",
+        ),
+      ]);
+
+      _areCustomImagesLoaded = true;
+      print("✅ All custom images loaded successfully");
+    } catch (e) {
+      print("❌ Error loading some custom images: $e");
+      _areCustomImagesLoaded = false;
+    }
+  }
+
+  // Search for locations using Mapbox Geocoding API
   Future<void> _searchLocation(String query) async {
     if (query.isEmpty) {
       setState(() {
@@ -64,60 +142,20 @@ class _MainscreenState extends State<Mainscreen> {
           _suggestions = data['features'] ?? [];
         });
       } else {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Error: ${response.statusCode}')),
-          );
-        }
+        _showErrorSnackBar('Search error: ${response.statusCode}');
       }
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Error searching location: $e')));
-      }
+      _showErrorSnackBar('Error searching location: $e');
     }
   }
 
-  Future<void> _searchLocationTonavigate(String query) async {
-    if (query.isEmpty) {
-      setState(() {
-        _suggestions = [];
-      });
-      return;
-    }
-
-    final accessToken = dotenv.env['MAPBOX_ACCESS_TOKEN'] ?? '';
-    final url = Uri.parse(
-      'https://api.mapbox.com/geocoding/v5/mapbox.places/$query.json?access_token=$accessToken',
-    );
-
-    try {
-      final response = await http.get(url);
-
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body);
-        setState(() {
-          _suggestions = data['features'] ?? [];
-        });
-      } else {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Error: ${response.statusCode}')),
-          );
-        }
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Error searching location: $e')));
-      }
-    }
+  // Search for navigation destinations
+  Future<void> _searchLocationToNavigate(String query) async {
+    await _searchLocation(query); // Reuse the same search logic
   }
 
-  // getting routes - fixed to return List<Position>
-  Future<List<Position>> _getroute(
+  // Get route from start to end coordinates
+  Future<List<Position>> _getRoute(
     double startLat,
     double startLng,
     double endLat,
@@ -128,180 +166,238 @@ class _MainscreenState extends State<Mainscreen> {
       'https://api.mapbox.com/directions/v5/mapbox/walking/$startLng,$startLat;$endLng,$endLat?geometries=geojson&access_token=$accessToken',
     );
 
-    final response = await http.get(url);
+    try {
+      final response = await http.get(url);
 
-    if (response.statusCode == 200) {
-      final data = json.decode(response.body);
-      final routes = data['routes'];
-      if (routes != null && routes.isNotEmpty) {
-        final route = routes[0]['geometry']['coordinates'];
-        List<Position> routePoints = [];
-        for (var coordinate in route) {
-          routePoints.add(Position(coordinate[0], coordinate[1]));
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        final routes = data['routes'];
+
+        if (routes != null && routes.isNotEmpty) {
+          final routeCoordinates = routes[0]['geometry']['coordinates'];
+          List<Position> routePoints = [];
+
+          for (var coordinate in routeCoordinates) {
+            routePoints.add(
+              Position(coordinate[0], coordinate[1]),
+            ); // [lng, lat]
+          }
+
+          return routePoints;
+        } else {
+          throw Exception('No routes found');
         }
-        return routePoints;
       } else {
-        throw Exception('No routes found');
+        throw Exception('Failed to load route: ${response.statusCode}');
       }
-    } else {
-      throw Exception('Failed to load route: ${response.statusCode}');
+    } catch (e) {
+      print('Route error: $e');
+      rethrow;
     }
   }
 
-  // create polyline on the map - fixed to use PolylineAnnotationManager
-  Future<void> drawRoute(List<Position> routePoints) async {
-    if (polylineAnnotationManager == null) return;
+  // Draw route polyline on the map
+  Future<void> _drawRoute(List<Position> routePoints) async {
+    if (polylineAnnotationManager == null) {
+      print("Polyline annotation manager not ready");
+      return;
+    }
 
-    // Clear existing polylines first
-    await polylineAnnotationManager!.deleteAll();
+    try {
+      // Clear existing polylines
+      await polylineAnnotationManager!.deleteAll();
 
-    // Create polyline annotation options
-    final polylineAnnotationOptions = PolylineAnnotationOptions(
-      geometry: LineString(coordinates: routePoints),
-      lineColor: Colors.blue.value, // Convert Color to int
-      lineWidth: 5.0,
-    );
+      // Create new polyline
+      final polylineAnnotationOptions = PolylineAnnotationOptions(
+        geometry: LineString(coordinates: routePoints),
+        lineColor: Colors.blue.value,
+        lineWidth: 5.0,
+      );
 
-    // Create the polyline on the map
-    await polylineAnnotationManager!.create(polylineAnnotationOptions);
+      await polylineAnnotationManager!.create(polylineAnnotationOptions);
+      print("✅ Route drawn successfully");
+    } catch (e) {
+      print("❌ Error drawing route: $e");
+    }
   }
 
-  // Method to draw route from current location to destination
+  // Draw route from current location to destination
   Future<void> _drawRouteFromCurrentToDestination(
     double destLat,
     double destLng,
   ) async {
     if (_currentPosition == null) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Current location not available')),
-        );
-      }
+      _showErrorSnackBar('Current location not available');
       return;
     }
 
-    if (pointAnnotationManager == null || polylineAnnotationManager == null) {
+    if (!_isMapReady) {
+      _showErrorSnackBar('Map not ready');
       return;
     }
 
     try {
       // Get route points
-      final routePoints = await _getroute(
+      final routePoints = await _getRoute(
         _currentPosition!.latitude,
         _currentPosition!.longitude,
         destLat,
         destLng,
       );
 
-      // Draw the route on the map
-      await drawRoute(routePoints);
+      // Draw the route
+      await _drawRoute(routePoints);
 
-      // Clear previous point annotations
+      // Clear previous annotations
       await pointAnnotationManager!.deleteAll();
 
-      // Start point marker
-      await pointAnnotationManager!.create(
-        PointAnnotationOptions(
-          geometry: Point(
-            coordinates: Position(
-              _currentPosition!.longitude,
-              _currentPosition!.latitude,
-            ),
-          ),
-          textField: "Start",
-          textSize: 12.0,
-        ),
+      // Add start marker (current location)
+      await _createMarker(
+        longitude: _currentPosition!.longitude,
+        latitude: _currentPosition!.latitude,
+        title: "Start",
+        iconImage: _areCustomImagesLoaded ? "current-location-marker" : null,
       );
 
-      // End point marker
-      await pointAnnotationManager!.create(
-        PointAnnotationOptions(
-          geometry: Point(coordinates: Position(destLng, destLat)),
-          textField: "Destination",
-          textSize: 12.0,
-        ),
+      // Add destination marker
+      await _createMarker(
+        longitude: destLng,
+        latitude: destLat,
+        title: "Destination",
+        iconImage: _areCustomImagesLoaded ? "destination-marker" : null,
       );
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Failed to draw route: $e')));
-      }
+      _showErrorSnackBar('Failed to draw route: $e');
     }
   }
 
-  // Handle selection of a suggestion and fly the camera to that location
+  // Helper method to create markers
+  Future<void> _createMarker({
+    required double longitude,
+    required double latitude,
+    required String title,
+    String? iconImage,
+  }) async {
+    if (pointAnnotationManager == null) return;
+
+    try {
+      final pointAnnotationOptions = PointAnnotationOptions(
+        geometry: Point(coordinates: Position(longitude, latitude)),
+        iconImage: iconImage, // null will use default marker
+        iconSize: 1.0,
+        textField: title,
+        textSize: 12.0,
+        textColor: Colors.black.value,
+        textOffset: [0.0, -2.5],
+      );
+
+      final annotation = await pointAnnotationManager!.create(
+        pointAnnotationOptions,
+      );
+      print("✅ Marker created: $title (${annotation.id})");
+    } catch (e) {
+      print("❌ Error creating marker '$title': $e");
+    }
+  }
+
+  // Handle location search suggestion selection
   Future<void> _onSuggestionSelected(dynamic suggestion) async {
-    if (_mapboxMap == null || pointAnnotationManager == null) return;
+    if (!_isMapReady) {
+      print("Map not ready for suggestion selection");
+      return;
+    }
 
     final coordinates = suggestion['geometry']['coordinates'];
+    final longitude = coordinates[0]; // GeoJSON format: [lng, lat]
     final latitude = coordinates[1];
-    final longitude = coordinates[0];
+    final placeName = suggestion['place_name'] ?? 'Unknown location';
 
-    await _mapboxMap!.flyTo(
-      CameraOptions(
-        center: Point(coordinates: Position(longitude, latitude)),
-        zoom: 15.0,
-      ),
-      MapAnimationOptions(duration: 1000),
-    );
+    print("📍 Selected location: $placeName at [$longitude, $latitude]");
 
-    // Clear previous annotations
-    await pointAnnotationManager!.deleteAll();
+    try {
+      // Clear previous annotations
+      await pointAnnotationManager!.deleteAll();
 
-    // Clear suggestions after selection
-    setState(() {
-      _suggestions = [];
-      _searchController.text = suggestion['place_name'] ?? '';
-    });
+      // Create marker for selected location
+      await _createMarker(
+        longitude: longitude,
+        latitude: latitude,
+        title: placeName,
+        iconImage: _areCustomImagesLoaded ? "custom-marker" : null,
+      );
+
+      // Move camera to location
+      await _mapboxMap!.flyTo(
+        CameraOptions(
+          center: Point(coordinates: Position(longitude, latitude)),
+          zoom: 15.0,
+        ),
+        MapAnimationOptions(duration: 1000),
+      );
+
+      // Update UI
+      setState(() {
+        _suggestions = [];
+        _searchController.text = placeName;
+      });
+    } catch (e) {
+      print("❌ Error handling suggestion selection: $e");
+      _showErrorSnackBar('Error selecting location');
+    }
   }
 
-  Future<void> _naviagteToLocation(dynamic suggestion) async {
-    if (_mapboxMap == null || pointAnnotationManager == null) return;
+  // Handle navigation to selected location
+  Future<void> _navigateToLocation(dynamic suggestion) async {
+    if (!_isMapReady) return;
 
     final coordinates = suggestion['geometry']['coordinates'];
-    final latitude = coordinates[1];
     final longitude = coordinates[0];
+    final latitude = coordinates[1];
+    final placeName = suggestion['place_name'] ?? 'Unknown location';
 
-    await _mapboxMap!.flyTo(
-      CameraOptions(
-        center: Point(coordinates: Position(longitude, latitude)),
-        zoom: 15.0,
-      ),
-      MapAnimationOptions(duration: 1000),
-    );
+    try {
+      // Move camera to destination
+      await _mapboxMap!.flyTo(
+        CameraOptions(
+          center: Point(coordinates: Position(longitude, latitude)),
+          zoom: 15.0,
+        ),
+        MapAnimationOptions(duration: 1000),
+      );
 
-    // Clear previous annotations
-    await pointAnnotationManager!.deleteAll();
-
-    // Add marker for the selected suggestion
-    final pointAnnotationOptions = PointAnnotationOptions(
-      geometry: Point(coordinates: Position(longitude, latitude)),
-      textField: suggestion['place_name'] ?? '',
-      textSize: 12.0,
-    );
-    await pointAnnotationManager!.create(pointAnnotationOptions);
-
-    // Draw route from current location to selected destination
-    if (_currentPosition != null) {
+      // Draw route and markers
       await _drawRouteFromCurrentToDestination(latitude, longitude);
-    }
 
-    // Clear suggestions after selection and close bottom sheet
-    setState(() {
-      _suggestions = [];
-      _searchNavigationController.text = suggestion['place_name'] ?? '';
-    });
+      // Update UI
+      setState(() {
+        _suggestions = [];
+        _searchNavigationController.text = placeName;
+      });
 
-    if (mounted) {
-      Navigator.of(context).pop(); // Close the bottom sheet
+      // Close bottom sheet
+      if (mounted) {
+        Navigator.of(context).pop();
+      }
+    } catch (e) {
+      print("❌ Error in navigation: $e");
+      _showErrorSnackBar('Navigation error: $e');
     }
   }
 
-  // Initialize location services and set up location listener
+  // Initialize location services
   Future<void> _initializeLocation() async {
     final hasPermission = await _handleLocationPermission();
-    if (hasPermission) {
+    if (!hasPermission) return;
+
+    try {
+      // Get initial position
+      final position = await geo.Geolocator.getCurrentPosition(
+        desiredAccuracy: geo.LocationAccuracy.high,
+      );
+
+      setState(() => _currentPosition = position);
+
+      // Set up position stream
       userpositionStream = geo.Geolocator.getPositionStream(
         locationSettings: const geo.LocationSettings(
           accuracy: geo.LocationAccuracy.high,
@@ -309,7 +405,9 @@ class _MainscreenState extends State<Mainscreen> {
         ),
       ).listen((position) {
         setState(() => _currentPosition = position);
-        if (_mapboxMap != null) {
+
+        // Only move camera if map is ready and this is initial load
+        if (_mapboxMap != null && _isMapReady) {
           _mapboxMap!.flyTo(
             CameraOptions(
               center: Point(
@@ -321,70 +419,55 @@ class _MainscreenState extends State<Mainscreen> {
           );
         }
       });
+
+      print("✅ Location initialized successfully");
+    } catch (e) {
+      print("❌ Error initializing location: $e");
     }
   }
 
-  // Request location permission if not granted
+  // Handle location permissions
   Future<bool> _handleLocationPermission() async {
-    bool serviceEnabled;
-    geo.LocationPermission permission;
-
-    serviceEnabled = await geo.Geolocator.isLocationServiceEnabled();
+    bool serviceEnabled = await geo.Geolocator.isLocationServiceEnabled();
     if (!serviceEnabled) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Location services are disabled')),
-        );
-      }
+      _showErrorSnackBar('Location services are disabled');
       return false;
     }
 
-    permission = await geo.Geolocator.checkPermission();
+    geo.LocationPermission permission = await geo.Geolocator.checkPermission();
     if (permission == geo.LocationPermission.denied) {
       permission = await geo.Geolocator.requestPermission();
       if (permission == geo.LocationPermission.denied) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Location permissions are denied')),
-          );
-        }
+        _showErrorSnackBar('Location permissions are denied');
         return false;
       }
     }
 
     if (permission == geo.LocationPermission.deniedForever) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Location permissions are permanently denied'),
-          ),
-        );
-      }
+      _showErrorSnackBar('Location permissions are permanently denied');
       return false;
     }
 
     return true;
   }
 
-  // Move the map camera to the user's current location
+  // Get current position and optionally move camera
   Future<void> _getCurrentPosition({bool moveCamera = true}) async {
     final hasPermission = await _handleLocationPermission();
     if (!hasPermission) return;
 
     try {
-      geo.Position position = await geo.Geolocator.getCurrentPosition(
+      final position = await geo.Geolocator.getCurrentPosition(
         desiredAccuracy: geo.LocationAccuracy.high,
       );
+
       setState(() => _currentPosition = position);
 
-      if (moveCamera && _mapboxMap != null) {
+      if (moveCamera && _mapboxMap != null && _isMapReady) {
         await _mapboxMap!.flyTo(
           CameraOptions(
             center: Point(
-              coordinates: Position(
-                _currentPosition!.longitude,
-                _currentPosition!.latitude,
-              ),
+              coordinates: Position(position.longitude, position.latitude),
             ),
             zoom: 15.0,
           ),
@@ -392,14 +475,15 @@ class _MainscreenState extends State<Mainscreen> {
         );
       }
     } catch (e) {
-      debugPrint(e.toString());
+      _showErrorSnackBar('Error getting location: $e');
     }
   }
 
-  // navigate user selected location
-  Future<void> _navigateTo(BuildContext context) async {
-    _searchController.clear();
-    _suggestions = []; // Clear previous suggestions
+  // Show navigation bottom sheet
+  Future<void> _showNavigationBottomSheet() async {
+    _searchNavigationController.clear();
+    setState(() => _suggestions = []);
+
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -434,7 +518,8 @@ class _MainscreenState extends State<Mainscreen> {
                             borderRadius: BorderRadius.circular(2),
                           ),
                         ),
-                        // Fixed header section that doesn't scroll
+
+                        // Header section
                         Container(
                           padding: const EdgeInsets.symmetric(horizontal: 16.0),
                           child: Column(
@@ -449,7 +534,7 @@ class _MainscreenState extends State<Mainscreen> {
                               const SizedBox(height: 16.0),
                               TextField(
                                 controller: _searchNavigationController,
-                                onChanged: _searchLocationTonavigate,
+                                onChanged: _searchLocationToNavigate,
                                 autofocus: true,
                                 decoration: InputDecoration(
                                   hintText: "Search location",
@@ -461,9 +546,7 @@ class _MainscreenState extends State<Mainscreen> {
                                     icon: const Icon(Icons.clear),
                                     onPressed: () {
                                       _searchNavigationController.clear();
-                                      setState(() {
-                                        _suggestions = [];
-                                      });
+                                      setState(() => _suggestions = []);
                                     },
                                   ),
                                 ),
@@ -472,7 +555,8 @@ class _MainscreenState extends State<Mainscreen> {
                             ],
                           ),
                         ),
-                        // Scrollable content area
+
+                        // Scrollable suggestions
                         Expanded(
                           child:
                               _suggestions.isNotEmpty &&
@@ -511,7 +595,7 @@ class _MainscreenState extends State<Mainscreen> {
                                             ),
                                           ),
                                           onTap:
-                                              () => _naviagteToLocation(
+                                              () => _navigateToLocation(
                                                 suggestion,
                                               ),
                                         ),
@@ -554,29 +638,71 @@ class _MainscreenState extends State<Mainscreen> {
     );
   }
 
-  // Set up the Mapbox map and annotation manager
+  // Initialize map and annotation managers
   Future<void> _onMapCreated(MapboxMap mapboxMap) async {
+    print("🗺️ Map widget created, initializing...");
     _mapboxMap = mapboxMap;
-    pointAnnotationManager =
-        await _mapboxMap!.annotations.createPointAnnotationManager();
 
-    // Create polyline annotation manager
-    polylineAnnotationManager =
-        await _mapboxMap!.annotations.createPolylineAnnotationManager();
+    try {
+      // Load map style
+      await _mapboxMap!.loadStyleURI(MapboxStyles.MAPBOX_STREETS);
+      print("✅ Map style loaded");
 
-    await _mapboxMap!.location.updateSettings(
-      LocationComponentSettings(
-        enabled: true, // Enable the location component
-        pulsingEnabled: true, // Enable pulsing effect for location puck
-        showAccuracyRing: true, // Show accuracy ring around the location
-        locationPuck: LocationPuck(
-          locationPuck2D:
-              DefaultLocationPuck2D(), // Fixed: Use DefaultLocationPuck2D
+      // Wait for style to be fully ready
+      await Future.delayed(const Duration(milliseconds: 500));
+
+      // Load custom images FIRST
+      await _loadAllCustomImages();
+
+      // Create annotation managers
+      pointAnnotationManager =
+          await _mapboxMap!.annotations.createPointAnnotationManager();
+      polylineAnnotationManager =
+          await _mapboxMap!.annotations.createPolylineAnnotationManager();
+
+      print("✅ Annotation managers created");
+
+      // Enable location display
+      await _mapboxMap!.location.updateSettings(
+        LocationComponentSettings(
+          enabled: true,
+          pulsingEnabled: true,
+          showAccuracyRing: true,
+          locationPuck: LocationPuck(locationPuck2D: DefaultLocationPuck2D()),
         ),
-      ),
-    );
+      );
 
-    await _getCurrentPosition();
+      // Move to current location if available
+      if (_currentPosition != null) {
+        await _mapboxMap!.flyTo(
+          CameraOptions(
+            center: Point(
+              coordinates: Position(
+                _currentPosition!.longitude,
+                _currentPosition!.latitude,
+              ),
+            ),
+            zoom: 15.0,
+          ),
+          MapAnimationOptions(duration: 1000),
+        );
+      }
+
+      _isMapReady = true;
+      print("✅ Map fully initialized and ready");
+    } catch (e) {
+      print("❌ Error initializing map: $e");
+      _showErrorSnackBar('Error initializing map: $e');
+    }
+  }
+
+  // Helper method to show error messages
+  void _showErrorSnackBar(String message) {
+    if (mounted) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(message)));
+    }
   }
 
   @override
@@ -585,33 +711,43 @@ class _MainscreenState extends State<Mainscreen> {
       body: SafeArea(
         child: Stack(
           children: [
+            // Map widget
             MapWidget(
               key: const ValueKey("mapWidget"),
               onMapCreated: _onMapCreated,
             ),
+
+            // Current location button
             Positioned(
               right: 16,
               bottom: 16,
               child: FloatingActionButton(
                 onPressed: () => _getCurrentPosition(moveCamera: true),
+                tooltip: 'Go to current location',
                 child: const Icon(Icons.my_location),
               ),
             ),
+
+            // Navigation button
             Positioned(
               right: 16,
               bottom: 80,
               child: FloatingActionButton(
-                onPressed: () => _navigateTo(context),
+                onPressed: _showNavigationBottomSheet,
+                tooltip: 'Navigate to location',
                 child: const Icon(Icons.navigation_outlined),
               ),
             ),
+
+            // Search interface
             Positioned(
               top: 40,
               left: 0,
               right: 0,
-              bottom: 200, // Leave space for FABs
+              bottom: 200,
               child: Column(
                 children: [
+                  // Search field
                   Padding(
                     padding: const EdgeInsets.all(16.0),
                     child: TextField(
@@ -629,15 +765,14 @@ class _MainscreenState extends State<Mainscreen> {
                           icon: const Icon(Icons.clear),
                           onPressed: () {
                             _searchController.clear();
-                            setState(() {
-                              _suggestions = [];
-                            });
+                            setState(() => _suggestions = []);
                           },
                         ),
                       ),
                     ),
                   ),
-                  // Display suggestions below the search field
+
+                  // Search suggestions
                   if (_suggestions.isNotEmpty &&
                       _searchController.text.isNotEmpty)
                     Expanded(
