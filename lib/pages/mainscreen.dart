@@ -14,13 +14,15 @@ class Mainscreen extends StatefulWidget {
 }
 
 class _MainscreenState extends State<Mainscreen> {
-  late MapboxMap _mapboxMap;
+  MapboxMap? _mapboxMap;
   geo.Position? _currentPosition;
   final TextEditingController _searchController = TextEditingController();
   List<dynamic> _suggestions = [];
+  final TextEditingController _searchNavigationController =
+      TextEditingController();
 
-  late PointAnnotationManager pointAnnotationManager;
-  late PolylineAnnotationManager polylineAnnotationManager;
+  PointAnnotationManager? pointAnnotationManager;
+  PolylineAnnotationManager? polylineAnnotationManager;
 
   StreamSubscription? userpositionStream;
 
@@ -34,89 +36,83 @@ class _MainscreenState extends State<Mainscreen> {
   @override
   void dispose() {
     userpositionStream?.cancel();
+    _searchController.dispose();
+    _searchNavigationController.dispose();
     super.dispose();
   }
 
-  // Fetch location suggestions based on user input
-  // Future<void> _getLocationSuggestions(String query) async {
-  //   if (query.isEmpty || _searchController.text.isEmpty) {
-  //     setState(() {
-  //       _suggestions = [];
-  //     });
-  //     return;
-  //   }
-
-  //   final accessToken = dotenv.env['MAPBOX_ACCESS_TOKEN'] ?? '';
-  //   final url = Uri.parse(
-  //     'https://api.mapbox.com/geocoding/v5/mapbox.places/$query.json?access_token=$accessToken',
-  //   );
-
-  //   final response = await http.get(url);
-
-  //   if (response.statusCode == 200) {
-  //     final data = json.decode(response.body);
-  //     setState(() {
-  //       _suggestions = data['features'];
-  //     });
-  //   } else {
-  //     ScaffoldMessenger.of(
-  //       context,
-  //     ).showSnackBar(SnackBar(content: Text('Error: ${response.statusCode}')));
-  //   }
-  // }
-
   // Add this method to handle searching based on the query
   Future<void> _searchLocation(String query) async {
-    if (query.isEmpty || _searchController.text.isEmpty) {
+    if (query.isEmpty) {
       setState(() {
         _suggestions = [];
       });
       return;
     }
+
     final accessToken = dotenv.env['MAPBOX_ACCESS_TOKEN'] ?? '';
     final url = Uri.parse(
       'https://api.mapbox.com/geocoding/v5/mapbox.places/$query.json?access_token=$accessToken',
     );
 
-    final response = await http.get(url);
+    try {
+      final response = await http.get(url);
 
-    if (response.statusCode == 200) {
-      final data = json.decode(response.body);
-
-      if (data['features'].isNotEmpty) {
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
         setState(() {
-          _suggestions = data['features'];
+          _suggestions = data['features'] ?? [];
         });
-        final feature = data['features'][0];
-        final coordinates = feature['geometry']['coordinates'];
-        final position = Position(coordinates[0], coordinates[1]);
-
-        // Fly to the searched location
-
-        // Optionally, add a marker for the searched location
-        // final pointAnnotationOptions = PointAnnotationOptions(
-        //   geometry: Point(coordinates: position),
-        //   textField: feature['place_name'],
-        //   textSize: 12.0,
-        // );
-        // await pointAnnotationManager.create(pointAnnotationOptions);
-
-        // // Draw route from current location to searched destination
-        // if (_currentPosition != null) {
-        //   await _drawRouteFromCurrentToDestination(
-        //     coordinates[1],
-        //     coordinates[0],
-        //   );
-        // }
       } else {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Error: ${response.statusCode}')),
+          );
+        }
+      }
+    } catch (e) {
+      if (mounted) {
         ScaffoldMessenger.of(
           context,
-        ).showSnackBar(const SnackBar(content: Text('No results found')));
+        ).showSnackBar(SnackBar(content: Text('Error searching location: $e')));
       }
-    } else {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Error: ${response.statusCode}')));
+    }
+  }
+
+  Future<void> _searchLocationTonavigate(String query) async {
+    if (query.isEmpty) {
+      setState(() {
+        _suggestions = [];
+      });
+      return;
+    }
+
+    final accessToken = dotenv.env['MAPBOX_ACCESS_TOKEN'] ?? '';
+    final url = Uri.parse(
+      'https://api.mapbox.com/geocoding/v5/mapbox.places/$query.json?access_token=$accessToken',
+    );
+
+    try {
+      final response = await http.get(url);
+
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        setState(() {
+          _suggestions = data['features'] ?? [];
+        });
+      } else {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Error: ${response.statusCode}')),
+          );
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Error searching location: $e')));
+      }
     }
   }
 
@@ -136,12 +132,17 @@ class _MainscreenState extends State<Mainscreen> {
 
     if (response.statusCode == 200) {
       final data = json.decode(response.body);
-      final route = data['routes'][0]['geometry']['coordinates'];
-      List<Position> routePoints = [];
-      for (var coordinate in route) {
-        routePoints.add(Position(coordinate[0], coordinate[1]));
+      final routes = data['routes'];
+      if (routes != null && routes.isNotEmpty) {
+        final route = routes[0]['geometry']['coordinates'];
+        List<Position> routePoints = [];
+        for (var coordinate in route) {
+          routePoints.add(Position(coordinate[0], coordinate[1]));
+        }
+        return routePoints;
+      } else {
+        throw Exception('No routes found');
       }
-      return routePoints;
     } else {
       throw Exception('Failed to load route: ${response.statusCode}');
     }
@@ -149,8 +150,10 @@ class _MainscreenState extends State<Mainscreen> {
 
   // create polyline on the map - fixed to use PolylineAnnotationManager
   Future<void> drawRoute(List<Position> routePoints) async {
+    if (polylineAnnotationManager == null) return;
+
     // Clear existing polylines first
-    await polylineAnnotationManager.deleteAll();
+    await polylineAnnotationManager!.deleteAll();
 
     // Create polyline annotation options
     final polylineAnnotationOptions = PolylineAnnotationOptions(
@@ -160,7 +163,7 @@ class _MainscreenState extends State<Mainscreen> {
     );
 
     // Create the polyline on the map
-    await polylineAnnotationManager.create(polylineAnnotationOptions);
+    await polylineAnnotationManager!.create(polylineAnnotationOptions);
   }
 
   // Method to draw route from current location to destination
@@ -169,9 +172,15 @@ class _MainscreenState extends State<Mainscreen> {
     double destLng,
   ) async {
     if (_currentPosition == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Current location not available')),
-      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Current location not available')),
+        );
+      }
+      return;
+    }
+
+    if (pointAnnotationManager == null || polylineAnnotationManager == null) {
       return;
     }
 
@@ -188,10 +197,10 @@ class _MainscreenState extends State<Mainscreen> {
       await drawRoute(routePoints);
 
       // Clear previous point annotations
-      await pointAnnotationManager.deleteAll();
+      await pointAnnotationManager!.deleteAll();
 
       // Start point marker
-      await pointAnnotationManager.create(
+      await pointAnnotationManager!.create(
         PointAnnotationOptions(
           geometry: Point(
             coordinates: Position(
@@ -205,7 +214,7 @@ class _MainscreenState extends State<Mainscreen> {
       );
 
       // End point marker
-      await pointAnnotationManager.create(
+      await pointAnnotationManager!.create(
         PointAnnotationOptions(
           geometry: Point(coordinates: Position(destLng, destLat)),
           textField: "Destination",
@@ -213,19 +222,23 @@ class _MainscreenState extends State<Mainscreen> {
         ),
       );
     } catch (e) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Failed to draw route: $e')));
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Failed to draw route: $e')));
+      }
     }
   }
 
   // Handle selection of a suggestion and fly the camera to that location
   Future<void> _onSuggestionSelected(dynamic suggestion) async {
+    if (_mapboxMap == null || pointAnnotationManager == null) return;
+
     final coordinates = suggestion['geometry']['coordinates'];
     final latitude = coordinates[1];
     final longitude = coordinates[0];
 
-    _mapboxMap.flyTo(
+    await _mapboxMap!.flyTo(
       CameraOptions(
         center: Point(coordinates: Position(longitude, latitude)),
         zoom: 15.0,
@@ -234,26 +247,55 @@ class _MainscreenState extends State<Mainscreen> {
     );
 
     // Clear previous annotations
-    await pointAnnotationManager.deleteAll();
+    await pointAnnotationManager!.deleteAll();
+
+    // Clear suggestions after selection
+    setState(() {
+      _suggestions = [];
+      _searchController.text = suggestion['place_name'] ?? '';
+    });
+  }
+
+  Future<void> _naviagteToLocation(dynamic suggestion) async {
+    if (_mapboxMap == null || pointAnnotationManager == null) return;
+
+    final coordinates = suggestion['geometry']['coordinates'];
+    final latitude = coordinates[1];
+    final longitude = coordinates[0];
+
+    await _mapboxMap!.flyTo(
+      CameraOptions(
+        center: Point(coordinates: Position(longitude, latitude)),
+        zoom: 15.0,
+      ),
+      MapAnimationOptions(duration: 1000),
+    );
+
+    // Clear previous annotations
+    await pointAnnotationManager!.deleteAll();
 
     // Add marker for the selected suggestion
     final pointAnnotationOptions = PointAnnotationOptions(
       geometry: Point(coordinates: Position(longitude, latitude)),
-      textField: suggestion['place_name'],
+      textField: suggestion['place_name'] ?? '',
       textSize: 12.0,
     );
-    await pointAnnotationManager.create(pointAnnotationOptions);
+    await pointAnnotationManager!.create(pointAnnotationOptions);
 
     // Draw route from current location to selected destination
     if (_currentPosition != null) {
       await _drawRouteFromCurrentToDestination(latitude, longitude);
     }
 
-    // Clear suggestions after selection
+    // Clear suggestions after selection and close bottom sheet
     setState(() {
       _suggestions = [];
-      _searchController.text = suggestion['place_name'];
+      _searchNavigationController.text = suggestion['place_name'] ?? '';
     });
+
+    if (mounted) {
+      Navigator.of(context).pop(); // Close the bottom sheet
+    }
   }
 
   // Initialize location services and set up location listener
@@ -267,15 +309,17 @@ class _MainscreenState extends State<Mainscreen> {
         ),
       ).listen((position) {
         setState(() => _currentPosition = position);
-        _mapboxMap.flyTo(
-          CameraOptions(
-            center: Point(
-              coordinates: Position(position.longitude, position.latitude),
+        if (_mapboxMap != null) {
+          _mapboxMap!.flyTo(
+            CameraOptions(
+              center: Point(
+                coordinates: Position(position.longitude, position.latitude),
+              ),
+              zoom: 15.0,
             ),
-            zoom: 15.0,
-          ),
-          MapAnimationOptions(duration: 300),
-        );
+            MapAnimationOptions(duration: 300),
+          );
+        }
       });
     }
   }
@@ -287,9 +331,11 @@ class _MainscreenState extends State<Mainscreen> {
 
     serviceEnabled = await geo.Geolocator.isLocationServiceEnabled();
     if (!serviceEnabled) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Location services are disabled')),
-      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Location services are disabled')),
+        );
+      }
       return false;
     }
 
@@ -297,20 +343,23 @@ class _MainscreenState extends State<Mainscreen> {
     if (permission == geo.LocationPermission.denied) {
       permission = await geo.Geolocator.requestPermission();
       if (permission == geo.LocationPermission.denied) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Location permissions are denied')),
-        );
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Location permissions are denied')),
+          );
+        }
         return false;
       }
     }
 
     if (permission == geo.LocationPermission.deniedForever) {
-      // ignore: use_build_context_synchronously
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Location permissions are permanently denied'),
-        ),
-      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Location permissions are permanently denied'),
+          ),
+        );
+      }
       return false;
     }
 
@@ -329,7 +378,7 @@ class _MainscreenState extends State<Mainscreen> {
       setState(() => _currentPosition = position);
 
       if (moveCamera && _mapboxMap != null) {
-        await _mapboxMap.flyTo(
+        await _mapboxMap!.flyTo(
           CameraOptions(
             center: Point(
               coordinates: Position(
@@ -347,23 +396,182 @@ class _MainscreenState extends State<Mainscreen> {
     }
   }
 
+  // navigate user selected location
+  Future<void> _navigateTo(BuildContext context) async {
+    _searchController.clear();
+    _suggestions = []; // Clear previous suggestions
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder:
+          (context) => Padding(
+            padding: EdgeInsets.only(
+              bottom: MediaQuery.of(context).viewInsets.bottom,
+            ),
+            child: DraggableScrollableSheet(
+              initialChildSize: 0.5,
+              minChildSize: 0.25,
+              maxChildSize: 0.9,
+              expand: false,
+              builder:
+                  (_, controller) => Container(
+                    decoration: const BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.vertical(
+                        top: Radius.circular(16.0),
+                      ),
+                    ),
+                    child: Column(
+                      children: [
+                        // Drag handle
+                        Container(
+                          width: 40,
+                          height: 4,
+                          margin: const EdgeInsets.only(top: 8, bottom: 16),
+                          decoration: BoxDecoration(
+                            color: Colors.grey[300],
+                            borderRadius: BorderRadius.circular(2),
+                          ),
+                        ),
+                        // Fixed header section that doesn't scroll
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                          child: Column(
+                            children: [
+                              const Text(
+                                'Get Direction To A Location',
+                                style: TextStyle(
+                                  fontSize: 18,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                              const SizedBox(height: 16.0),
+                              TextField(
+                                controller: _searchNavigationController,
+                                onChanged: _searchLocationTonavigate,
+                                autofocus: true,
+                                decoration: InputDecoration(
+                                  hintText: "Search location",
+                                  border: const OutlineInputBorder(),
+                                  filled: true,
+                                  fillColor: Colors.white,
+                                  prefixIcon: const Icon(Icons.search),
+                                  suffixIcon: IconButton(
+                                    icon: const Icon(Icons.clear),
+                                    onPressed: () {
+                                      _searchNavigationController.clear();
+                                      setState(() {
+                                        _suggestions = [];
+                                      });
+                                    },
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(height: 8.0),
+                            ],
+                          ),
+                        ),
+                        // Scrollable content area
+                        Expanded(
+                          child:
+                              _suggestions.isNotEmpty &&
+                                      _searchNavigationController
+                                          .text
+                                          .isNotEmpty
+                                  ? ListView.builder(
+                                    controller: controller,
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 16.0,
+                                    ),
+                                    itemCount: _suggestions.length,
+                                    itemBuilder: (context, index) {
+                                      final suggestion = _suggestions[index];
+                                      return Card(
+                                        margin: const EdgeInsets.only(
+                                          bottom: 8.0,
+                                        ),
+                                        child: ListTile(
+                                          leading: const Icon(
+                                            Icons.location_on,
+                                            color: Colors.blue,
+                                          ),
+                                          title: Text(
+                                            suggestion['place_name'] ??
+                                                'Unknown location',
+                                            maxLines: 2,
+                                            overflow: TextOverflow.ellipsis,
+                                          ),
+                                          subtitle: Text(
+                                            suggestion['properties']?['address'] ??
+                                                '',
+                                            style: TextStyle(
+                                              fontSize: 12,
+                                              color: Colors.grey[600],
+                                            ),
+                                          ),
+                                          onTap:
+                                              () => _naviagteToLocation(
+                                                suggestion,
+                                              ),
+                                        ),
+                                      );
+                                    },
+                                  )
+                                  : Container(
+                                    padding: const EdgeInsets.all(16.0),
+                                    child: Column(
+                                      mainAxisAlignment:
+                                          MainAxisAlignment.center,
+                                      children: [
+                                        Icon(
+                                          Icons.search_outlined,
+                                          size: 40,
+                                          color: Colors.grey[400],
+                                        ),
+                                        const SizedBox(height: 5),
+                                        Text(
+                                          _searchNavigationController
+                                                  .text
+                                                  .isEmpty
+                                              ? 'Start typing to search for locations'
+                                              : 'No locations found',
+                                          style: TextStyle(
+                                            fontSize: 16,
+                                            color: Colors.grey[600],
+                                          ),
+                                          textAlign: TextAlign.center,
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                        ),
+                      ],
+                    ),
+                  ),
+            ),
+          ),
+    );
+  }
+
   // Set up the Mapbox map and annotation manager
   Future<void> _onMapCreated(MapboxMap mapboxMap) async {
     _mapboxMap = mapboxMap;
     pointAnnotationManager =
-        await _mapboxMap.annotations.createPointAnnotationManager();
+        await _mapboxMap!.annotations.createPointAnnotationManager();
 
     // Create polyline annotation manager
     polylineAnnotationManager =
-        await _mapboxMap.annotations.createPolylineAnnotationManager();
+        await _mapboxMap!.annotations.createPolylineAnnotationManager();
 
-    _mapboxMap.location.updateSettings(
+    await _mapboxMap!.location.updateSettings(
       LocationComponentSettings(
         enabled: true, // Enable the location component
         pulsingEnabled: true, // Enable pulsing effect for location puck
         showAccuracyRing: true, // Show accuracy ring around the location
         locationPuck: LocationPuck(
-          locationPuck2D: LocationPuck2D(), // Default 2D puck style
+          locationPuck2D:
+              DefaultLocationPuck2D(), // Fixed: Use DefaultLocationPuck2D
         ),
       ),
     );
@@ -389,58 +597,101 @@ class _MainscreenState extends State<Mainscreen> {
                 child: const Icon(Icons.my_location),
               ),
             ),
-            Column(
-              children: [
-                Padding(
-                  padding: const EdgeInsets.all(16.0),
-                  child: TextField(
-                    controller: _searchController,
-                    onChanged: _searchLocation,
-                    decoration: InputDecoration(
-                      hintText: "Search location",
-                      border: OutlineInputBorder(),
-                      filled: true,
-                      fillColor: Colors.white,
-                      suffixIcon: IconButton(
-                        icon: const Icon(Icons.clear),
-                        onPressed: () {
-                          _searchController.clear();
-                          setState(() {
-                            _suggestions = [];
-                          });
-                        },
+            Positioned(
+              right: 16,
+              bottom: 80,
+              child: FloatingActionButton(
+                onPressed: () => _navigateTo(context),
+                child: const Icon(Icons.navigation_outlined),
+              ),
+            ),
+            Positioned(
+              top: 40,
+              left: 0,
+              right: 0,
+              bottom: 200, // Leave space for FABs
+              child: Column(
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.all(16.0),
+                    child: TextField(
+                      controller: _searchController,
+                      onChanged: _searchLocation,
+                      decoration: InputDecoration(
+                        hintText: "Search location",
+                        border: const OutlineInputBorder(
+                          borderRadius: BorderRadius.all(Radius.circular(100)),
+                        ),
+                        filled: true,
+                        fillColor: Colors.white,
+                        prefixIcon: const Icon(Icons.search),
+                        suffixIcon: IconButton(
+                          icon: const Icon(Icons.clear),
+                          onPressed: () {
+                            _searchController.clear();
+                            setState(() {
+                              _suggestions = [];
+                            });
+                          },
+                        ),
                       ),
                     ),
                   ),
-                ),
-                // Display suggestions below the search field
-                if (_suggestions.isNotEmpty)
-                  Expanded(
-                    child: ListView.builder(
-                      itemCount: _suggestions.length,
-                      itemBuilder: (context, index) {
-                        final suggestion = _suggestions[index];
-                        return Container(
-                          decoration: BoxDecoration(
-                            color: Colors.white,
-                            border: Border(
-                              bottom: BorderSide(color: Colors.grey.shade300),
+                  // Display suggestions below the search field
+                  if (_suggestions.isNotEmpty &&
+                      _searchController.text.isNotEmpty)
+                    Expanded(
+                      child: Container(
+                        margin: const EdgeInsets.symmetric(horizontal: 16.0),
+                        decoration: BoxDecoration(
+                          color: const Color.fromARGB(167, 255, 255, 255),
+                          borderRadius: BorderRadius.circular(8.0),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withOpacity(0.1),
+                              blurRadius: 4,
+                              offset: const Offset(0, 2),
                             ),
-                          ),
-                          child: Container(
-                            decoration: BoxDecoration(
-                              borderRadius: BorderRadius.circular(8.0),
-                            ),
-                            child: ListTile(
-                              title: Text(suggestion['place_name']),
-                              onTap: () => _onSuggestionSelected(suggestion),
-                            ),
-                          ),
-                        );
-                      },
+                          ],
+                        ),
+                        child: ListView.builder(
+                          itemCount: _suggestions.length,
+                          itemBuilder: (context, index) {
+                            final suggestion = _suggestions[index];
+                            return Container(
+                              decoration: BoxDecoration(
+                                border:
+                                    index < _suggestions.length - 1
+                                        ? Border(
+                                          bottom: BorderSide(
+                                            color: Colors.grey.shade200,
+                                          ),
+                                        )
+                                        : null,
+                              ),
+                              child: ListTile(
+                                leading: const Icon(
+                                  Icons.location_on,
+                                  color: Colors.blue,
+                                  size: 20,
+                                ),
+                                title: Text(
+                                  suggestion['place_name'] ??
+                                      'Unknown location',
+                                  style: const TextStyle(fontSize: 14),
+                                  maxLines: 4,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                                dense: true,
+                                onTap: () => _onSuggestionSelected(suggestion),
+                              ),
+                            );
+                          },
+                        ),
+                      ),
                     ),
-                  ),
-              ],
+                ],
+              ),
             ),
           ],
         ),
