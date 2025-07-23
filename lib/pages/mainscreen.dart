@@ -51,7 +51,6 @@ class _MainscreenState extends State<Mainscreen> {
     required String imageId,
     required String assetPath,
     double scale = 1.0,
-    double displayScale = 1.0,
   }) async {
     if (_mapboxMap?.style == null) {
       print("Map style not ready for image: $imageId");
@@ -73,7 +72,7 @@ class _MainscreenState extends State<Mainscreen> {
 
       await _mapboxMap!.style.addStyleImage(
         imageId,
-        scale * displayScale, // Use display scale for rendering
+        scale, // Use display scale for rendering
         mbxImage,
         false, // sdf
         [], // stretchX
@@ -98,8 +97,7 @@ class _MainscreenState extends State<Mainscreen> {
       await Future.wait([
         _addCustomImageToStyle(
           imageId: "custom-marker",
-          assetPath: "assets/icons/marker.png",
-          displayScale: 0.2,
+          assetPath: "assets/icons/marker1.png",
         ),
         _addCustomImageToStyle(
           imageId: "destination-marker",
