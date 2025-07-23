@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:font_awesome_flutter/font_awesome_flutter.dart';
+import 'package:map/pages/log_in_page.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 // Make sure to import your LoginScreen or define it
@@ -125,11 +127,59 @@ class _SignUpScreenState extends State<SignUpScreen> {
               SizedBox(
                 width: double.infinity,
                 child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.blue,
+                    foregroundColor: Colors.white,
+                  ),
                   onPressed: _isLoading ? null : _signUp,
                   child:
                       _isLoading
                           ? CircularProgressIndicator(color: Colors.white)
                           : Text('Sign Up'),
+                ),
+              ),
+
+              TextButton(
+                style: TextButton.styleFrom(foregroundColor: Colors.blue),
+                onPressed: () {
+                  // Navigate to login screen
+                  Navigator.pushReplacement(
+                    context,
+                    MaterialPageRoute(builder: (_) => LoginScreen()),
+                  );
+                },
+                child: Text('Already have an account? Sign In'),
+              ),
+              Text('Or'),
+              ElevatedButton(
+                style: TextButton.styleFrom(
+                  backgroundColor: Colors.white,
+                  foregroundColor: Colors.black,
+                ),
+                onPressed: () {},
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    FaIcon(FontAwesomeIcons.google, size: 15),
+
+                    SizedBox(width: 8),
+                    Text('Continue with Google'),
+                  ],
+                ),
+              ),
+              ElevatedButton(
+                style: TextButton.styleFrom(
+                  backgroundColor: Colors.white,
+                  foregroundColor: Colors.black,
+                ),
+                onPressed: () {},
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    FaIcon(FontAwesomeIcons.facebook),
+                    SizedBox(width: 8),
+                    Text('Continue with Facebook'),
+                  ],
                 ),
               ),
             ],

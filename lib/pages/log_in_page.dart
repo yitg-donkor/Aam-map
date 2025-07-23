@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:map/pages/sign_up_page.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
@@ -144,6 +145,8 @@ class _LoginScreenState extends State<LoginScreen> {
                 child: ElevatedButton(
                   onPressed: _isLoading ? null : _logIn,
                   style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.blue,
+                    foregroundColor: Colors.white,
                     padding: EdgeInsets.symmetric(vertical: 16),
                   ),
                   child:
@@ -158,23 +161,56 @@ class _LoginScreenState extends State<LoginScreen> {
                     _isLoading
                         ? null
                         : () {
+                          // Add forgot password functionality
+                          _showForgotPasswordDialog();
+                        },
+                child: Text('Forgot Password?'),
+              ),
+              ElevatedButton(
+                style: TextButton.styleFrom(
+                  backgroundColor: Colors.white,
+                  foregroundColor: Colors.black,
+                ),
+                onPressed: () {},
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    FaIcon(FontAwesomeIcons.google, size: 15),
+
+                    SizedBox(width: 8),
+                    Text('Continue with Google'),
+                  ],
+                ),
+              ),
+              ElevatedButton(
+                style: TextButton.styleFrom(
+                  backgroundColor: Colors.white,
+                  foregroundColor: Colors.black,
+                ),
+                onPressed: () {},
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    FaIcon(FontAwesomeIcons.facebook),
+                    SizedBox(width: 8),
+                    Text('Continue with Facebook'),
+
+                    SizedBox(height: 8),
+                  ],
+                ),
+              ),
+              SizedBox(height: 16),
+              TextButton(
+                onPressed:
+                    _isLoading
+                        ? null
+                        : () {
                           Navigator.push(
                             context,
                             MaterialPageRoute(builder: (_) => SignUpScreen()),
                           );
                         },
                 child: Text('Don\'t have an account? Sign up'),
-              ),
-              SizedBox(height: 8),
-              TextButton(
-                onPressed:
-                    _isLoading
-                        ? null
-                        : () {
-                          // Add forgot password functionality
-                          _showForgotPasswordDialog();
-                        },
-                child: Text('Forgot Password?'),
               ),
             ],
           ),
