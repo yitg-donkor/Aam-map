@@ -1,9 +1,13 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:ui' as ui;
+import 'package:curved_navigation_bar/curved_navigation_bar.dart';
 import 'package:flutter/material.dart';
 import 'dart:typed_data';
 import 'package:flutter/services.dart';
+import 'package:map/pages/chats_page.dart';
+import 'package:map/pages/profile_page.dart';
+import 'package:map/pages/sign_up_page.dart';
 import 'package:mapbox_maps_flutter/mapbox_maps_flutter.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:geolocator/geolocator.dart' as geo;
@@ -17,6 +21,10 @@ class Mainscreen extends StatefulWidget {
 }
 
 class _MainscreenState extends State<Mainscreen> {
+  // Navigation
+  int _currentIndex = 0;
+
+  // Map related
   MapboxMap? _mapboxMap;
   geo.Position? _currentPosition;
   final TextEditingController _searchController = TextEditingController();
@@ -65,26 +73,24 @@ class _MainscreenState extends State<Mainscreen> {
       final ui.Image decodedImage = await decodeImageFromList(imageData);
 
       final mbxImage = MbxImage(
-        width: decodedImage.width, // Use actual width
-        height: decodedImage.height, // Use actual height
+        width: decodedImage.width,
+        height: decodedImage.height,
         data: imageData,
       );
 
       await _mapboxMap!.style.addStyleImage(
         imageId,
-        scale, // Use display scale for rendering
+        scale,
         mbxImage,
-        false, // sdf
-        [], // stretchX
-        [], // stretchY
-        null, // content
+        false,
+        [],
+        [],
+        null,
       );
 
       print(
         "✅ Custom image '$imageId' loaded successfully (${decodedImage.width}x${decodedImage.height})",
       );
-
-      // Clean up
       decodedImage.dispose();
     } catch (e) {
       print("❌ Error loading image '$imageId': $e");
@@ -149,7 +155,7 @@ class _MainscreenState extends State<Mainscreen> {
 
   // Search for navigation destinations
   Future<void> _searchLocationToNavigate(String query) async {
-    await _searchLocation(query); // Reuse the same search logic
+    await _searchLocation(query);
   }
 
   // Get route from start to end coordinates
@@ -176,9 +182,7 @@ class _MainscreenState extends State<Mainscreen> {
           List<Position> routePoints = [];
 
           for (var coordinate in routeCoordinates) {
-            routePoints.add(
-              Position(coordinate[0], coordinate[1]),
-            ); // [lng, lat]
+            routePoints.add(Position(coordinate[0], coordinate[1]));
           }
 
           return routePoints;
@@ -202,10 +206,8 @@ class _MainscreenState extends State<Mainscreen> {
     }
 
     try {
-      // Clear existing polylines
       await polylineAnnotationManager!.deleteAll();
 
-      // Create new polyline
       final polylineAnnotationOptions = PolylineAnnotationOptions(
         geometry: LineString(coordinates: routePoints),
         lineColor: Colors.blue.value,
@@ -235,7 +237,6 @@ class _MainscreenState extends State<Mainscreen> {
     }
 
     try {
-      // Get route points
       final routePoints = await _getRoute(
         _currentPosition!.latitude,
         _currentPosition!.longitude,
@@ -243,13 +244,9 @@ class _MainscreenState extends State<Mainscreen> {
         destLng,
       );
 
-      // Draw the route
       await _drawRoute(routePoints);
-
-      // Clear previous annotations
       await pointAnnotationManager!.deleteAll();
 
-      // Add start marker (current location)
       await _createMarker(
         longitude: _currentPosition!.longitude,
         latitude: _currentPosition!.latitude,
@@ -257,7 +254,6 @@ class _MainscreenState extends State<Mainscreen> {
         iconImage: _areCustomImagesLoaded ? "current-location-marker" : null,
       );
 
-      // Add destination marker
       await _createMarker(
         longitude: destLng,
         latitude: destLat,
@@ -281,7 +277,7 @@ class _MainscreenState extends State<Mainscreen> {
     try {
       final pointAnnotationOptions = PointAnnotationOptions(
         geometry: Point(coordinates: Position(longitude, latitude)),
-        iconImage: iconImage, // null will use default marker
+        iconImage: iconImage,
         iconSize: 1.0,
         textField: title,
         textSize: 12.0,
@@ -306,17 +302,15 @@ class _MainscreenState extends State<Mainscreen> {
     }
 
     final coordinates = suggestion['geometry']['coordinates'];
-    final longitude = coordinates[0]; // GeoJSON format: [lng, lat]
+    final longitude = coordinates[0];
     final latitude = coordinates[1];
     final placeName = suggestion['place_name'] ?? 'Unknown location';
 
     print("📍 Selected location: $placeName at [$longitude, $latitude]");
 
     try {
-      // Clear previous annotations
       await pointAnnotationManager!.deleteAll();
 
-      // Create marker for selected location
       await _createMarker(
         longitude: longitude,
         latitude: latitude,
@@ -324,7 +318,6 @@ class _MainscreenState extends State<Mainscreen> {
         iconImage: _areCustomImagesLoaded ? "custom-marker" : null,
       );
 
-      // Move camera to location
       await _mapboxMap!.flyTo(
         CameraOptions(
           center: Point(coordinates: Position(longitude, latitude)),
@@ -333,7 +326,6 @@ class _MainscreenState extends State<Mainscreen> {
         MapAnimationOptions(duration: 1000),
       );
 
-      // Update UI
       setState(() {
         _suggestions = [];
         _searchController.text = placeName;
@@ -354,7 +346,6 @@ class _MainscreenState extends State<Mainscreen> {
     final placeName = suggestion['place_name'] ?? 'Unknown location';
 
     try {
-      // Move camera to destination
       await _mapboxMap!.flyTo(
         CameraOptions(
           center: Point(coordinates: Position(longitude, latitude)),
@@ -363,16 +354,13 @@ class _MainscreenState extends State<Mainscreen> {
         MapAnimationOptions(duration: 1000),
       );
 
-      // Draw route and markers
       await _drawRouteFromCurrentToDestination(latitude, longitude);
 
-      // Update UI
       setState(() {
         _suggestions = [];
         _searchNavigationController.text = placeName;
       });
 
-      // Close bottom sheet
       if (mounted) {
         Navigator.of(context).pop();
       }
@@ -388,14 +376,12 @@ class _MainscreenState extends State<Mainscreen> {
     if (!hasPermission) return;
 
     try {
-      // Get initial position
       final position = await geo.Geolocator.getCurrentPosition(
         desiredAccuracy: geo.LocationAccuracy.high,
       );
 
       setState(() => _currentPosition = position);
 
-      // Set up position stream
       userpositionStream = geo.Geolocator.getPositionStream(
         locationSettings: const geo.LocationSettings(
           accuracy: geo.LocationAccuracy.high,
@@ -404,7 +390,6 @@ class _MainscreenState extends State<Mainscreen> {
       ).listen((position) {
         setState(() => _currentPosition = position);
 
-        // Only move camera if map is ready and this is initial load
         if (_mapboxMap != null && _isMapReady) {
           _mapboxMap!.flyTo(
             CameraOptions(
@@ -642,17 +627,12 @@ class _MainscreenState extends State<Mainscreen> {
     _mapboxMap = mapboxMap;
 
     try {
-      // Load map style
       await _mapboxMap!.loadStyleURI(MapboxStyles.MAPBOX_STREETS);
       print("✅ Map style loaded");
 
-      // Wait for style to be fully ready
       await Future.delayed(const Duration(milliseconds: 500));
-
-      // Load custom images FIRST
       await _loadAllCustomImages();
 
-      // Create annotation managers
       pointAnnotationManager =
           await _mapboxMap!.annotations.createPointAnnotationManager();
       polylineAnnotationManager =
@@ -660,7 +640,6 @@ class _MainscreenState extends State<Mainscreen> {
 
       print("✅ Annotation managers created");
 
-      // Enable location display
       await _mapboxMap!.location.updateSettings(
         LocationComponentSettings(
           enabled: true,
@@ -670,7 +649,6 @@ class _MainscreenState extends State<Mainscreen> {
         ),
       );
 
-      // Move to current location if available
       if (_currentPosition != null) {
         await _mapboxMap!.flyTo(
           CameraOptions(
@@ -703,131 +681,162 @@ class _MainscreenState extends State<Mainscreen> {
     }
   }
 
+  // Build map page
+  Widget _buildMapPage() {
+    return Stack(
+      children: [
+        // Map widget
+        MapWidget(
+          key: const ValueKey("mapWidget"),
+          onMapCreated: _onMapCreated,
+        ),
+
+        // Current location button
+        Positioned(
+          right: 16,
+          bottom: 16,
+          child: FloatingActionButton(
+            heroTag: "currentLocationBtn",
+            onPressed: () => _getCurrentPosition(moveCamera: true),
+            tooltip: 'Go to current location',
+            child: const Icon(Icons.my_location),
+          ),
+        ),
+
+        // Navigation button
+        Positioned(
+          right: 16,
+          bottom: 80,
+          child: FloatingActionButton(
+            heroTag: "navigationBtn",
+            onPressed: _showNavigationBottomSheet,
+            tooltip: 'Navigate to location',
+            child: const Icon(Icons.navigation_outlined),
+          ),
+        ),
+
+        // Search interface
+        Positioned(
+          top: 40,
+          left: 0,
+          right: 0,
+          bottom: 200,
+          child: Column(
+            children: [
+              // Search field
+              Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: TextField(
+                  controller: _searchController,
+                  onChanged: _searchLocation,
+                  decoration: InputDecoration(
+                    hintText: "Search location",
+                    border: const OutlineInputBorder(
+                      borderRadius: BorderRadius.all(Radius.circular(100)),
+                    ),
+                    filled: true,
+                    fillColor: Colors.white,
+                    prefixIcon: const Icon(Icons.search),
+                    suffixIcon: IconButton(
+                      icon: const Icon(Icons.clear),
+                      onPressed: () {
+                        _searchController.clear();
+                        setState(() => _suggestions = []);
+                      },
+                    ),
+                  ),
+                ),
+              ),
+
+              // Search suggestions
+              if (_suggestions.isNotEmpty && _searchController.text.isNotEmpty)
+                Expanded(
+                  child: Container(
+                    margin: const EdgeInsets.symmetric(horizontal: 16.0),
+                    decoration: BoxDecoration(
+                      color: const Color.fromARGB(167, 255, 255, 255),
+                      borderRadius: BorderRadius.circular(8.0),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withOpacity(0.1),
+                          blurRadius: 4,
+                          offset: const Offset(0, 2),
+                        ),
+                      ],
+                    ),
+                    child: ListView.builder(
+                      itemCount: _suggestions.length,
+                      itemBuilder: (context, index) {
+                        final suggestion = _suggestions[index];
+                        return Container(
+                          decoration: BoxDecoration(
+                            border:
+                                index < _suggestions.length - 1
+                                    ? Border(
+                                      bottom: BorderSide(
+                                        color: Colors.grey.shade200,
+                                      ),
+                                    )
+                                    : null,
+                          ),
+                          child: ListTile(
+                            leading: const Icon(
+                              Icons.location_on,
+                              color: Colors.blue,
+                              size: 20,
+                            ),
+                            title: Text(
+                              suggestion['place_name'] ?? 'Unknown location',
+                              style: const TextStyle(fontSize: 14),
+                              maxLines: 4,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            dense: true,
+                            onTap: () => _onSuggestionSelected(suggestion),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  // Get list of pages
+  List<Widget> get _pages => [
+    _buildMapPage(),
+    const ChatsPage(),
+    const ProfilePage(),
+  ];
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       body: SafeArea(
-        child: Stack(
-          children: [
-            // Map widget
-            MapWidget(
-              key: const ValueKey("mapWidget"),
-              onMapCreated: _onMapCreated,
-            ),
-
-            // Current location button
-            Positioned(
-              right: 16,
-              bottom: 16,
-              child: FloatingActionButton(
-                onPressed: () => _getCurrentPosition(moveCamera: true),
-                tooltip: 'Go to current location',
-                child: const Icon(Icons.my_location),
-              ),
-            ),
-
-            // Navigation button
-            Positioned(
-              right: 16,
-              bottom: 80,
-              child: FloatingActionButton(
-                onPressed: _showNavigationBottomSheet,
-                tooltip: 'Navigate to location',
-                child: const Icon(Icons.navigation_outlined),
-              ),
-            ),
-
-            // Search interface
-            Positioned(
-              top: 40,
-              left: 0,
-              right: 0,
-              bottom: 200,
-              child: Column(
-                children: [
-                  // Search field
-                  Padding(
-                    padding: const EdgeInsets.all(16.0),
-                    child: TextField(
-                      controller: _searchController,
-                      onChanged: _searchLocation,
-                      decoration: InputDecoration(
-                        hintText: "Search location",
-                        border: const OutlineInputBorder(
-                          borderRadius: BorderRadius.all(Radius.circular(100)),
-                        ),
-                        filled: true,
-                        fillColor: Colors.white,
-                        prefixIcon: const Icon(Icons.search),
-                        suffixIcon: IconButton(
-                          icon: const Icon(Icons.clear),
-                          onPressed: () {
-                            _searchController.clear();
-                            setState(() => _suggestions = []);
-                          },
-                        ),
-                      ),
-                    ),
-                  ),
-
-                  // Search suggestions
-                  if (_suggestions.isNotEmpty &&
-                      _searchController.text.isNotEmpty)
-                    Expanded(
-                      child: Container(
-                        margin: const EdgeInsets.symmetric(horizontal: 16.0),
-                        decoration: BoxDecoration(
-                          color: const Color.fromARGB(167, 255, 255, 255),
-                          borderRadius: BorderRadius.circular(8.0),
-                          boxShadow: [
-                            BoxShadow(
-                              color: Colors.black.withOpacity(0.1),
-                              blurRadius: 4,
-                              offset: const Offset(0, 2),
-                            ),
-                          ],
-                        ),
-                        child: ListView.builder(
-                          itemCount: _suggestions.length,
-                          itemBuilder: (context, index) {
-                            final suggestion = _suggestions[index];
-                            return Container(
-                              decoration: BoxDecoration(
-                                border:
-                                    index < _suggestions.length - 1
-                                        ? Border(
-                                          bottom: BorderSide(
-                                            color: Colors.grey.shade200,
-                                          ),
-                                        )
-                                        : null,
-                              ),
-                              child: ListTile(
-                                leading: const Icon(
-                                  Icons.location_on,
-                                  color: Colors.blue,
-                                  size: 20,
-                                ),
-                                title: Text(
-                                  suggestion['place_name'] ??
-                                      'Unknown location',
-                                  style: const TextStyle(fontSize: 14),
-                                  maxLines: 4,
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                                dense: true,
-                                onTap: () => _onSuggestionSelected(suggestion),
-                              ),
-                            );
-                          },
-                        ),
-                      ),
-                    ),
-                ],
-              ),
-            ),
-          ],
-        ),
+        child: IndexedStack(index: _currentIndex, children: _pages),
+      ),
+      bottomNavigationBar: CurvedNavigationBar(
+        index: _currentIndex,
+        height: 60.0,
+        items: const <Widget>[
+          Icon(Icons.map, size: 30),
+          Icon(Icons.search, size: 30),
+          Icon(Icons.person, size: 30),
+        ],
+        color: Colors.blue,
+        buttonBackgroundColor: Colors.white,
+        backgroundColor: Colors.transparent,
+        animationCurve: Curves.easeInOut,
+        animationDuration: const Duration(milliseconds: 300),
+        onTap: (index) {
+          setState(() {
+            _currentIndex = index;
+          });
+        },
       ),
     );
   }
