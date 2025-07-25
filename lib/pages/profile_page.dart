@@ -1,6 +1,7 @@
 // ignore_for_file: avoid_print
 
 import 'package:flutter/material.dart';
+import 'package:map/data/user_stats.dart';
 import 'package:map/pages/profile_settings.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
@@ -18,10 +19,43 @@ class _ProfilePageState extends State<ProfilePage> {
   String selectedAvatar = '';
   bool isLoading = true;
 
+  UserStats? userStats;
+  bool isLoadingStats = true;
+
   @override
   void initState() {
     super.initState();
     _loadUserProfile();
+    _loadUserStats();
+  }
+
+  Future<void> _loadUserStats() async {
+    try {
+      setState(() {
+        isLoadingStats = true;
+      });
+
+      final stats = await UserStatsService.getUserStats();
+
+      if (mounted) {
+        setState(() {
+          userStats = stats;
+          isLoadingStats = false;
+        });
+      }
+
+      print(
+        "✅ Stats loaded successfully: ${stats.places} places, ${stats.routes} routes, ${stats.formattedDistance}",
+      );
+    } catch (error) {
+      print('❌ Error loading stats: $error');
+      if (mounted) {
+        setState(() {
+          userStats = UserStats(places: 0, routes: 0, distance: 0.0);
+          isLoadingStats = false;
+        });
+      }
+    }
   }
 
   Future<void> _loadUserProfile() async {
@@ -51,6 +85,7 @@ class _ProfilePageState extends State<ProfilePage> {
             isLoading = false;
           });
         }
+        _loadUserStats(); // Load user stats after profile
 
         print("✅ Profile loaded successfully: $userName, $department, $level");
       } else {
@@ -273,11 +308,28 @@ class _ProfilePageState extends State<ProfilePage> {
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceAround,
                 children: [
-                  _buildStatColumn('Places', '127', Icons.place),
+                  _buildStatColumn(
+                    'Places',
+                    isLoadingStats ? '...' : '${userStats?.places ?? 0}',
+                    Icons.place,
+                    isLoading: isLoadingStats,
+                  ),
                   _buildDivider(),
-                  _buildStatColumn('Routes', '43', Icons.route),
+                  _buildStatColumn(
+                    'Routes',
+                    isLoadingStats ? '...' : '${userStats?.routes ?? 0}',
+                    Icons.route,
+                    isLoading: isLoadingStats,
+                  ),
                   _buildDivider(),
-                  _buildStatColumn('Distance', '2.4k km', Icons.straighten),
+                  _buildStatColumn(
+                    'Distance',
+                    isLoadingStats
+                        ? '...'
+                        : (userStats?.formattedDistance ?? '0 km'),
+                    Icons.straighten,
+                    isLoading: isLoadingStats,
+                  ),
                 ],
               ),
             ),
@@ -386,7 +438,12 @@ class _ProfilePageState extends State<ProfilePage> {
     );
   }
 
-  Widget _buildStatColumn(String label, String value, IconData icon) {
+  Widget _buildStatColumn(
+    String label,
+    String value,
+    IconData icon, {
+    bool isLoading = false,
+  }) {
     return Column(
       children: [
         Container(
@@ -398,14 +455,23 @@ class _ProfilePageState extends State<ProfilePage> {
           child: Icon(icon, color: Colors.blue.shade600, size: 24),
         ),
         const SizedBox(height: 8),
-        Text(
-          value,
-          style: const TextStyle(
-            fontSize: 20,
-            fontWeight: FontWeight.bold,
-            color: Colors.black87,
-          ),
-        ),
+        isLoading
+            ? Container(
+              height: 20,
+              width: 40,
+              decoration: BoxDecoration(
+                color: Colors.grey[300],
+                borderRadius: BorderRadius.circular(4),
+              ),
+            )
+            : Text(
+              value,
+              style: const TextStyle(
+                fontSize: 20,
+                fontWeight: FontWeight.bold,
+                color: Colors.black87,
+              ),
+            ),
         const SizedBox(height: 4),
         Text(
           label,
