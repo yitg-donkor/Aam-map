@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:map/pages/profile_settings.dart';
 
 class ProfilePage extends StatefulWidget {
   const ProfilePage({super.key});
@@ -180,7 +181,12 @@ class _ProfilePageState extends State<ProfilePage> {
                     Icons.person_outline,
                     'Edit Profile',
                     'Update your personal information',
-                    () => _showComingSoon(context),
+                    () => Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (context) => ProfileSettingsPage(),
+                      ),
+                    ),
                   ),
                   _buildMenuItem(
                     Icons.favorite_outline,
