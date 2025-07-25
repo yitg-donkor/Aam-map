@@ -2,6 +2,7 @@
 
 import 'package:flutter/material.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:map/auths/authwrapper.dart';
 import 'package:map/pages/mainscreen.dart';
 import 'package:map/pages/sign_up_page.dart';
 import 'package:mapbox_maps_flutter/mapbox_maps_flutter.dart';
@@ -29,7 +30,7 @@ class MyApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       title: 'Map App',
       theme: ThemeData(primarySwatch: Colors.blue),
-      home: Mainscreen(),
+      home: Authwrapper(),
     );
   }
 }

@@ -1,5 +1,8 @@
+// ignore_for_file: avoid_print
+
 import 'package:flutter/material.dart';
 import 'package:map/pages/profile_settings.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 class ProfilePage extends StatefulWidget {
   const ProfilePage({super.key});
@@ -9,6 +12,94 @@ class ProfilePage extends StatefulWidget {
 }
 
 class _ProfilePageState extends State<ProfilePage> {
+  String userName = 'Loading...';
+  String department = '';
+  String level = '';
+  String selectedAvatar = '';
+  bool isLoading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadUserProfile();
+  }
+
+  Future<void> _loadUserProfile() async {
+    try {
+      final user = Supabase.instance.client.auth.currentUser;
+      if (user != null) {
+        print(
+          '🔍 _loadUserProfile: Querying users table for user ID: ${user.id}',
+        );
+
+        final response =
+            await Supabase.instance.client
+                .from('users')
+                .select()
+                .eq('id', user.id)
+                .single();
+
+        print('📦 _loadUserProfile: Database response received');
+        print('📊 _loadUserProfile: Profile data: $response');
+
+        if (mounted) {
+          setState(() {
+            userName = response['username'] ?? 'Unknown User';
+            department = response['department'] ?? '';
+            level = response['level']?.toString() ?? '';
+            selectedAvatar = response['avatar_url'] ?? '';
+            isLoading = false;
+          });
+        }
+
+        print("✅ Profile loaded successfully: $userName, $department, $level");
+      } else {
+        print("❌ No authenticated user found");
+        if (mounted) {
+          setState(() {
+            userName = 'Not logged in';
+            isLoading = false;
+          });
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('No authenticated user found')),
+          );
+        }
+      }
+    } catch (error) {
+      print('❌ _loadUserProfile: Error loading user profile: $error');
+      if (mounted) {
+        setState(() {
+          userName = 'Error loading profile';
+          isLoading = false;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error loading profile: $error')),
+        );
+      }
+    }
+  }
+
+  Future<void> _handleLogout() async {
+    try {
+      await Supabase.instance.client.auth.signOut();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Logged out successfully'),
+            backgroundColor: Colors.green,
+          ),
+        );
+        // Navigate to login page or handle logout navigation
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Error logging out: $error')));
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -77,11 +168,21 @@ class _ProfilePageState extends State<ProfilePage> {
                               ),
                             ],
                           ),
-                          child: const CircleAvatar(
-                            radius: 50,
-                            backgroundImage: NetworkImage(
-                              'https://images.unsplash.com/photo-1472099645785-5658abf4ff4e?w=150&h=150&fit=crop&crop=face',
-                            ),
+                          child: CircleAvatar(
+                            radius: 60,
+                            backgroundColor: Colors.grey[300],
+                            backgroundImage:
+                                selectedAvatar.isNotEmpty
+                                    ? NetworkImage(selectedAvatar)
+                                    : null,
+                            child:
+                                selectedAvatar.isEmpty
+                                    ? const Icon(
+                                      Icons.person,
+                                      size: 60,
+                                      color: Colors.grey,
+                                    )
+                                    : null,
                           ),
                         ),
                         const SizedBox(width: 20),
@@ -90,22 +191,42 @@ class _ProfilePageState extends State<ProfilePage> {
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              const Text(
-                                'John Doe',
-                                style: TextStyle(
-                                  fontSize: 28,
-                                  fontWeight: FontWeight.bold,
-                                  color: Colors.white,
-                                ),
-                              ),
+                              isLoading
+                                  ? Container(
+                                    height: 28,
+                                    width: 150,
+                                    decoration: BoxDecoration(
+                                      color: Colors.white.withOpacity(0.3),
+                                      borderRadius: BorderRadius.circular(4),
+                                    ),
+                                  )
+                                  : Text(
+                                    userName,
+                                    style: const TextStyle(
+                                      fontSize: 28,
+                                      fontWeight: FontWeight.bold,
+                                      color: Colors.white,
+                                    ),
+                                  ),
                               const SizedBox(height: 5),
-                              Text(
-                                'Software Developer',
-                                style: TextStyle(
-                                  fontSize: 16,
-                                  color: Colors.white.withOpacity(0.9),
-                                ),
-                              ),
+                              isLoading
+                                  ? Container(
+                                    height: 16,
+                                    width: 100,
+                                    decoration: BoxDecoration(
+                                      color: Colors.white.withOpacity(0.2),
+                                      borderRadius: BorderRadius.circular(4),
+                                    ),
+                                  )
+                                  : Text(
+                                    department.isNotEmpty
+                                        ? department
+                                        : 'Department not set',
+                                    style: TextStyle(
+                                      fontSize: 16,
+                                      color: Colors.white.withOpacity(0.9),
+                                    ),
+                                  ),
                               const SizedBox(height: 10),
                               Row(
                                 children: [
@@ -186,7 +307,9 @@ class _ProfilePageState extends State<ProfilePage> {
                       MaterialPageRoute(
                         builder: (context) => ProfileSettingsPage(),
                       ),
-                    ),
+                    ).then(
+                      (_) => _loadUserProfile(),
+                    ), // Reload profile after editing
                   ),
                   _buildMenuItem(
                     Icons.favorite_outline,
@@ -377,13 +500,7 @@ class _ProfilePageState extends State<ProfilePage> {
               ElevatedButton(
                 onPressed: () {
                   Navigator.of(context).pop();
-                  // Add your logout logic here
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text('Logged out successfully'),
-                      backgroundColor: Colors.green,
-                    ),
-                  );
+                  _handleLogout();
                 },
                 style: ElevatedButton.styleFrom(
                   backgroundColor: Colors.red,
