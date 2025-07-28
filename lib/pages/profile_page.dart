@@ -3,6 +3,12 @@
 import 'package:flutter/material.dart';
 import 'package:map/data/user_stats.dart';
 import 'package:map/pages/profile_settings.dart';
+import 'package:map/profile_page_routes/help_support_page.dart';
+import 'package:map/profile_page_routes/navigation_historry_page.dart';
+import 'package:map/profile_page_routes/privacy_policy_page.dart';
+import 'package:map/profile_page_routes/saved_places_page.dart'
+    show SavedPlacesPage;
+import 'package:map/profile_page_routes/settings_page.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 class ProfilePage extends StatefulWidget {
@@ -367,31 +373,66 @@ class _ProfilePageState extends State<ProfilePage> {
                     Icons.favorite_outline,
                     'Saved Places',
                     'Your favorite locations',
-                    () => _showComingSoon(context),
+                    () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (context) => const SavedPlacesPage(),
+                        ),
+                      );
+                    },
                   ),
                   _buildMenuItem(
                     Icons.history,
                     'Navigation History',
                     'View your recent routes',
-                    () => _showComingSoon(context),
+                    () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (context) => const NavigationHistoryPage(),
+                        ),
+                      );
+                    },
                   ),
                   _buildMenuItem(
                     Icons.settings_outlined,
                     'Settings',
                     'App preferences and configurations',
-                    () => _showComingSoon(context),
+                    () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (context) => const SettingsPage(),
+                        ),
+                      );
+                    },
                   ),
                   _buildMenuItem(
                     Icons.help_outline,
                     'Help & Support',
                     'Get help and contact support',
-                    () => _showComingSoon(context),
+                    () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (context) => const HelpSupportPage(),
+                        ),
+                      );
+                    },
                   ),
                   _buildMenuItem(
                     Icons.privacy_tip_outlined,
                     'Privacy Policy',
                     'Read our privacy policy',
-                    () => _showComingSoon(context),
+                    () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (context) => const PrivacyPolicyPage(),
+                        ),
+                      );
+                    },
                     showDivider: false,
                   ),
                 ],
@@ -520,6 +561,7 @@ class _ProfilePageState extends State<ProfilePage> {
     );
   }
 
+  // ignore: unused_element
   void _showComingSoon(BuildContext context) {
     showDialog(
       context: context,

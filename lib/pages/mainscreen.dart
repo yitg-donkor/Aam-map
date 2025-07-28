@@ -10,11 +10,14 @@ import 'package:flutter/services.dart';
 import 'package:flutter_speed_dial/flutter_speed_dial.dart';
 import 'package:map/data/user_stats.dart';
 import 'package:map/pages/chats_page.dart';
+import 'package:map/pages/friends_page.dart';
+import 'package:map/pages/game_page.dart';
 import 'package:map/pages/profile_page.dart';
 import 'package:mapbox_maps_flutter/mapbox_maps_flutter.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:geolocator/geolocator.dart' as geo;
 import 'package:http/http.dart' as http;
+import 'dart:io';
 
 class Mainscreen extends StatefulWidget {
   const Mainscreen({super.key});
@@ -23,7 +26,7 @@ class Mainscreen extends StatefulWidget {
   State<Mainscreen> createState() => _MainscreenState();
 }
 
-class _MainscreenState extends State<Mainscreen> {
+class _MainscreenState extends State<Mainscreen> with WidgetsBindingObserver {
   // Navigation
   int _currentIndex = 0;
 
@@ -37,24 +40,287 @@ class _MainscreenState extends State<Mainscreen> {
 
   PointAnnotationManager? pointAnnotationManager;
   PolylineAnnotationManager? polylineAnnotationManager;
-  StreamSubscription? userpositionStream;
+  StreamSubscription<geo.Position>? userpositionStream;
 
   bool _isMapReady = false;
   bool _areCustomImagesLoaded = false;
+  geo.Position? _lastTrackedPosition;
+  double _totalDistanceTraveled = 0.0;
+  StreamSubscription<geo.Position>? _distanceTrackingStream;
+  bool _isTrackingDistance = false;
+  Timer? _distanceUpdateTimer;
+
+  // Distance tracking constants
+  static const double _minimumDistanceThreshold = 5.0; // meters
+  static const int _distanceUpdateIntervalSeconds = 30;
 
   @override
   void initState() {
     super.initState();
-    MapboxOptions.setAccessToken(dotenv.get('MAPBOX_ACCESS_TOKEN'));
-    _initializeLocation();
+    WidgetsBinding.instance.addObserver(this);
+    _initializeApp();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _cleanupResources();
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    switch (state) {
+      case AppLifecycleState.paused:
+        _pauseLocationTracking();
+        break;
+      case AppLifecycleState.resumed:
+        _resumeLocationTracking();
+        break;
+      case AppLifecycleState.detached:
+        _cleanupResources();
+        break;
+      default:
+        break;
+    }
+  }
+
+  Future<void> _initializeApp() async {
+    try {
+      MapboxOptions.setAccessToken(dotenv.get('MAPBOX_ACCESS_TOKEN'));
+      await _loadUserTotalDistance();
+      await _initializeLocation();
+      await _startDistanceTracking();
+    } catch (e) {
+      _handleError('Failed to initialize app', e);
+    }
+  }
+
+  void _cleanupResources() {
     userpositionStream?.cancel();
+    _distanceTrackingStream?.cancel();
+    _distanceUpdateTimer?.cancel();
     _searchController.dispose();
     _searchNavigationController.dispose();
-    super.dispose();
+  }
+
+  void _pauseLocationTracking() {
+    if (_isTrackingDistance) {
+      _stopDistanceTracking();
+    }
+  }
+
+  void _resumeLocationTracking() {
+    if (!_isTrackingDistance) {
+      _startDistanceTracking();
+    }
+  }
+
+  // Load user total distance traveled
+  Future<void> _loadUserTotalDistance() async {
+    try {
+      final stats = await UserStatsService.getUserStats();
+      if (mounted) {
+        setState(() {
+          _totalDistanceTraveled = stats.distance;
+        });
+      }
+      print(
+        '📊 Loaded total distance: ${_totalDistanceTraveled.toStringAsFixed(2)} km',
+      );
+    } catch (e) {
+      _handleError('Error loading total distance', e);
+    }
+  }
+
+  // Start real-time distance tracking
+  Future<void> _startDistanceTracking() async {
+    if (_isTrackingDistance) return;
+
+    final hasPermission = await _handleLocationPermission();
+    if (!hasPermission) return;
+
+    try {
+      setState(() {
+        _isTrackingDistance = true;
+      });
+
+      // Get initial position
+      final initialPosition = await geo.Geolocator.getCurrentPosition(
+        desiredAccuracy: geo.LocationAccuracy.high,
+        timeLimit: const Duration(seconds: 10),
+      );
+      _lastTrackedPosition = initialPosition;
+
+      print(
+        '🎯 Started distance tracking from: ${initialPosition.latitude}, ${initialPosition.longitude}',
+      );
+
+      // Start listening to position changes for distance tracking
+      _distanceTrackingStream = geo.Geolocator.getPositionStream(
+        locationSettings: const geo.LocationSettings(
+          accuracy: geo.LocationAccuracy.high,
+          distanceFilter: 3, // Update every 3 meters
+          timeLimit: Duration(seconds: 10),
+        ),
+      ).listen(
+        _onPositionUpdate,
+        onError: (error) {
+          _handleError('Distance tracking error', error);
+        },
+      );
+
+      // Start periodic database updates
+      _startPeriodicDistanceUpdates();
+    } catch (e) {
+      _handleError('Error starting distance tracking', e);
+      if (mounted) {
+        setState(() {
+          _isTrackingDistance = false;
+        });
+      }
+    }
+  }
+
+  void _onPositionUpdate(geo.Position newPosition) {
+    if (!mounted) return;
+
+    if (_lastTrackedPosition == null) {
+      _lastTrackedPosition = newPosition;
+      setState(() => _currentPosition = newPosition);
+      return;
+    }
+
+    final distance = _calculateDistance(
+      _lastTrackedPosition!.latitude,
+      _lastTrackedPosition!.longitude,
+      newPosition.latitude,
+      newPosition.longitude,
+    );
+
+    if (distance >= _minimumDistanceThreshold) {
+      final distanceKm = distance / 1000.0; // Convert to kilometers
+      setState(() {
+        _totalDistanceTraveled += distanceKm;
+        _lastTrackedPosition = newPosition;
+      });
+      print(
+        '🚶 Distance update: +${distanceKm.toStringAsFixed(3)} km (Total: ${_totalDistanceTraveled.toStringAsFixed(2)} km)',
+      );
+    }
+
+    setState(() => _currentPosition = newPosition);
+
+    if (_mapboxMap != null && _isMapReady) {
+      _mapboxMap!.flyTo(
+        CameraOptions(
+          center: Point(
+            coordinates: Position(newPosition.longitude, newPosition.latitude),
+          ),
+          zoom: 15.0,
+        ),
+        MapAnimationOptions(duration: 300),
+      );
+    }
+  }
+
+  void _startPeriodicDistanceUpdates() {
+    _distanceUpdateTimer = Timer.periodic(
+      const Duration(seconds: _distanceUpdateIntervalSeconds),
+      (timer) async {
+        if (_isTrackingDistance && _totalDistanceTraveled > 0 && mounted) {
+          await _saveDistanceToDatabase();
+        }
+      },
+    );
+  }
+
+  Future<void> _saveDistanceToDatabase() async {
+    try {
+      await UserStatsService.updateUserTotalDistance(_totalDistanceTraveled);
+      print(
+        '💾 Distance saved to database: ${_totalDistanceTraveled.toStringAsFixed(2)} km',
+      );
+    } catch (e) {
+      _handleError('Error saving distance to database', e);
+    }
+  }
+
+  double _calculateDistance(
+    double lat1,
+    double lon1,
+    double lat2,
+    double lon2,
+  ) {
+    const double earthRadius = 6371000; // Earth's radius in meters
+
+    double dLat = _degreesToRadians(lat2 - lat1);
+    double dLon = _degreesToRadians(lon2 - lon1);
+
+    double a =
+        sin(dLat / 2) * sin(dLat / 2) +
+        cos(_degreesToRadians(lat1)) *
+            cos(_degreesToRadians(lat2)) *
+            sin(dLon / 2) *
+            sin(dLon / 2);
+
+    double c = 2 * atan2(sqrt(a), sqrt(1 - a));
+
+    return earthRadius * c; // Distance in meters
+  }
+
+  double _degreesToRadians(double degrees) {
+    return degrees * (pi / 180);
+  }
+
+  Future<void> _stopDistanceTracking() async {
+    if (!_isTrackingDistance) return;
+
+    setState(() {
+      _isTrackingDistance = false;
+    });
+
+    _distanceTrackingStream?.cancel();
+    _distanceUpdateTimer?.cancel();
+
+    // Save final distance to database
+    await _saveDistanceToDatabase();
+
+    print(
+      '⏹️ Distance tracking stopped. Total: ${_totalDistanceTraveled.toStringAsFixed(2)} km',
+    );
+  }
+
+  void _resumeDistanceTracking() {
+    if (!_isTrackingDistance) {
+      _startDistanceTracking();
+    }
+  }
+
+  Future<void> _resetDistance() async {
+    if (mounted) {
+      setState(() {
+        _totalDistanceTraveled = 0.0;
+        _lastTrackedPosition = null;
+      });
+    }
+
+    try {
+      await UserStatsService.resetUserTotalDistance();
+      print('🔄 Distance reset to 0');
+    } catch (e) {
+      _handleError('Error resetting distance', e);
+    }
+  }
+
+  String get formattedTotalDistance {
+    if (_totalDistanceTraveled < 1.0) {
+      return '${(_totalDistanceTraveled * 1000).toInt()} m';
+    } else if (_totalDistanceTraveled < 10.0) {
+      return '${_totalDistanceTraveled.toStringAsFixed(1)} km';
+    } else {
+      return '${_totalDistanceTraveled.toStringAsFixed(0)} km';
+    }
   }
 
   // Load custom images into map style
@@ -96,7 +362,7 @@ class _MainscreenState extends State<Mainscreen> {
       );
       decodedImage.dispose();
     } catch (e) {
-      print("❌ Error loading image '$imageId': $e");
+      _handleError("Error loading image '$imageId'", e);
     }
   }
 
@@ -121,7 +387,7 @@ class _MainscreenState extends State<Mainscreen> {
       _areCustomImagesLoaded = true;
       print("✅ All custom images loaded successfully");
     } catch (e) {
-      print("❌ Error loading some custom images: $e");
+      _handleError("Error loading some custom images", e);
       _areCustomImagesLoaded = false;
     }
   }
@@ -129,30 +395,49 @@ class _MainscreenState extends State<Mainscreen> {
   // Search for locations using Mapbox Geocoding API
   Future<void> _searchLocation(String query) async {
     if (query.isEmpty) {
-      setState(() {
-        _suggestions = [];
-      });
+      if (mounted) {
+        setState(() {
+          _suggestions = [];
+        });
+      }
       return;
     }
 
     final accessToken = dotenv.env['MAPBOX_ACCESS_TOKEN'] ?? '';
+    if (accessToken.isEmpty) {
+      _showErrorSnackBar('Mapbox access token not configured');
+      return;
+    }
+
     final url = Uri.parse(
       'https://api.mapbox.com/geocoding/v5/mapbox.places/$query.json?access_token=$accessToken',
     );
 
     try {
-      final response = await http.get(url);
+      final response = await http
+          .get(url)
+          .timeout(
+            const Duration(seconds: 10),
+            onTimeout: () {
+              throw TimeoutException(
+                'Search request timed out',
+                const Duration(seconds: 10),
+              );
+            },
+          );
 
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
-        setState(() {
-          _suggestions = data['features'] ?? [];
-        });
+        if (mounted) {
+          setState(() {
+            _suggestions = data['features'] ?? [];
+          });
+        }
       } else {
         _showErrorSnackBar('Search error: ${response.statusCode}');
       }
     } catch (e) {
-      _showErrorSnackBar('Error searching location: $e');
+      _handleError('Error searching location', e);
     }
   }
 
@@ -161,11 +446,7 @@ class _MainscreenState extends State<Mainscreen> {
     await _searchLocation(query);
   }
 
-  // saving a new place or route
-
-  // Updated saveplace function with duplicate detection
-  // Updated saveplace function for Supabase
-
+  // Enhanced saveplace function with duplicate detection
   Future<void> saveplace() async {
     print('💾 saveplace: Starting to save current location');
 
@@ -184,12 +465,29 @@ class _MainscreenState extends State<Mainscreen> {
         '📍 saveplace: Current position - ${_currentPosition!.latitude}, ${_currentPosition!.longitude}',
       );
 
-      // Get place details using current location
+      // Get place details with improved error handling
       print('🔍 saveplace: Getting place details...');
-      final placeDetails = await getPlaceDetails(
-        _currentPosition!.latitude,
-        _currentPosition!.longitude,
-      );
+      Map<String, dynamic> placeDetails;
+
+      try {
+        placeDetails = await getPlaceDetails(
+          _currentPosition!.latitude,
+          _currentPosition!.longitude,
+        );
+      } catch (e) {
+        print(
+          '⚠️ saveplace: Failed to get place details, using coordinates as fallback',
+        );
+        placeDetails = {
+          'country': '',
+          'region': '',
+          'district': '',
+          'locality': '',
+          'postcode': '',
+          'full_place_name':
+              'Location at ${_currentPosition!.latitude.toStringAsFixed(6)}, ${_currentPosition!.longitude.toStringAsFixed(6)}',
+        };
+      }
 
       // Extract place name and formatted address
       final placeName = placeDetails['full_place_name'] as String;
@@ -204,7 +502,7 @@ class _MainscreenState extends State<Mainscreen> {
         placeName: placeName,
         latitude: _currentPosition!.latitude,
         longitude: _currentPosition!.longitude,
-        address: formattedAddress,
+        address: formattedAddress.isNotEmpty ? formattedAddress : null,
         radiusMeters: 50.0, // 50 meter radius for duplicate detection
       );
 
@@ -212,85 +510,22 @@ class _MainscreenState extends State<Mainscreen> {
 
       // Show success message to user
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Row(
-              children: [
-                const Icon(Icons.check_circle, color: Colors.white),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    'Location saved: ${placeName.length > 30 ? '${placeName.substring(0, 30)}...' : placeName}',
-                  ),
-                ),
-              ],
-            ),
-            backgroundColor: Colors.green,
-            behavior: SnackBarBehavior.floating,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(10),
-            ),
-            duration: const Duration(seconds: 3),
-          ),
+        _showSuccessSnackBar(
+          'Location saved: ${placeName.length > 30 ? '${placeName.substring(0, 30)}...' : placeName}',
         );
       }
     } catch (e) {
-      print('❌ saveplace: Error occurred - $e');
-      print('📍 saveplace: Error type - ${e.runtimeType}');
-
-      // Show error message to user
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Row(
-              children: [
-                const Icon(Icons.error, color: Colors.white),
-                const SizedBox(width: 8),
-                Expanded(child: Text('Failed to save location: $e')),
-              ],
-            ),
-            backgroundColor: Colors.red,
-            behavior: SnackBarBehavior.floating,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(10),
-            ),
-            duration: const Duration(seconds: 4),
-          ),
-        );
-      }
+      _handleError('Failed to save location', e);
     }
-  }
-
-  // Helper function to calculate distance between two coordinates
-  double calculateDistance(double lat1, double lon1, double lat2, double lon2) {
-    const double earthRadius = 6371000; // Earth's radius in meters
-
-    double dLat = _degreesToRadians(lat2 - lat1);
-    double dLon = _degreesToRadians(lon2 - lon1);
-
-    double a =
-        sin(dLat / 2) * sin(dLat / 2) +
-        cos(_degreesToRadians(lat1)) *
-            cos(_degreesToRadians(lat2)) *
-            sin(dLon / 2) *
-            sin(dLon / 2);
-
-    double c = 2 * atan2(sqrt(a), sqrt(1 - a));
-
-    return earthRadius * c; // Distance in meters
-  }
-
-  double _degreesToRadians(double degrees) {
-    return degrees * (pi / 180);
   }
 
   String _buildFormattedAddress(Map<String, dynamic> placeDetails) {
     List<String> addressParts = [];
 
-    final locality = placeDetails['locality'] as String? ?? '';
-    final district = placeDetails['district'] as String? ?? '';
-    final region = placeDetails['region'] as String? ?? '';
-    final country = placeDetails['country'] as String? ?? '';
+    final locality = (placeDetails['locality'] as String?)?.trim() ?? '';
+    final district = (placeDetails['district'] as String?)?.trim() ?? '';
+    final region = (placeDetails['region'] as String?)?.trim() ?? '';
+    final country = (placeDetails['country'] as String?)?.trim() ?? '';
 
     if (locality.isNotEmpty) addressParts.add(locality);
     if (district.isNotEmpty && district != locality) addressParts.add(district);
@@ -302,11 +537,7 @@ class _MainscreenState extends State<Mainscreen> {
         : 'Unknown Address';
   }
 
-  // Get route from start to end coordinates
-
-  // get current  location place name and coordinates
-
-  // Enhanced function to get detailed place information
+  // Enhanced getPlaceDetails function with better error handling
   Future<Map<String, dynamic>> getPlaceDetails(
     double latitude,
     double longitude,
@@ -315,11 +546,24 @@ class _MainscreenState extends State<Mainscreen> {
       '🔍 getPlaceDetails: Getting detailed place info for $latitude, $longitude',
     );
 
+    // Fallback data in case of API failure
+    final fallbackData = {
+      'country': '',
+      'region': '',
+      'district': '',
+      'locality': '',
+      'postcode': '',
+      'full_place_name': 'Location at $latitude, $longitude',
+    };
+
     try {
       final accessToken = dotenv.env['MAPBOX_ACCESS_TOKEN'] ?? '';
 
       if (accessToken.isEmpty) {
-        throw Exception('Mapbox access token not found');
+        print(
+          '⚠️ getPlaceDetails: Mapbox access token not found, using fallback',
+        );
+        return fallbackData;
       }
 
       final url =
@@ -327,71 +571,103 @@ class _MainscreenState extends State<Mainscreen> {
           '?access_token=$accessToken'
           '&types=country,region,postcode,district,place,locality,neighborhood,address,poi';
 
-      final response = await http
-          .get(Uri.parse(url))
-          .timeout(const Duration(seconds: 10));
+      print('🌐 getPlaceDetails: Making API request...');
 
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
+      final client = http.Client();
 
-        if (data['features'] != null && data['features'].isNotEmpty) {
-          final feature = data['features'][0];
-          final context = feature['context'] as List?;
-          final Current_place_name = feature['text'] as String?;
-          List<String> addressParts = [];
+      try {
+        final response = await client
+            .get(Uri.parse(url))
+            .timeout(
+              const Duration(seconds: 15),
+              onTimeout: () {
+                print('⏰ getPlaceDetails: Request timed out after 15 seconds');
+                throw TimeoutException(
+                  'Mapbox API request timed out',
+                  const Duration(seconds: 15),
+                );
+              },
+            );
 
-          // Extract address components
-          String country = '';
-          String region = '';
-          String district = '';
-          String locality = '';
-          String postcode = '';
+        if (response.statusCode == 200) {
+          print('✅ getPlaceDetails: API response received');
+          final data = jsonDecode(response.body);
 
-          if (context != null) {
-            for (var item in context) {
-              final id = item['id'] as String;
-              final text = item['text'] as String;
+          if (data['features'] != null && data['features'].isNotEmpty) {
+            final feature = data['features'][0];
+            final context = feature['context'] as List?;
 
-              if (id.startsWith('country')) {
-                country = text;
-              } else if (id.startsWith('region')) {
-                region = text;
-              } else if (id.startsWith('district')) {
-                district = text;
-              } else if (id.startsWith('locality') || id.startsWith('place')) {
-                locality = text;
-              } else if (id.startsWith('postcode')) {
-                postcode = text;
+            // Extract address components
+            String country = '';
+            String region = '';
+            String district = '';
+            String locality = '';
+            String postcode = '';
+
+            if (context != null) {
+              for (var item in context) {
+                final id = item['id'] as String;
+                final text = item['text'] as String;
+
+                if (id.startsWith('country')) {
+                  country = text;
+                } else if (id.startsWith('region')) {
+                  region = text;
+                } else if (id.startsWith('district')) {
+                  district = text;
+                } else if (id.startsWith('locality') ||
+                    id.startsWith('place')) {
+                  locality = text;
+                } else if (id.startsWith('postcode')) {
+                  postcode = text;
+                }
               }
             }
-          }
 
-          return {
-            'country': country,
-            'region': region,
-            'district': district,
-            'locality': locality,
-            'postcode': postcode,
-            'full_place_name': feature['place_name'],
-          };
+            final result = {
+              'country': country,
+              'region': region,
+              'district': district,
+              'locality': locality,
+              'postcode': postcode,
+              'full_place_name':
+                  feature['place_name'] ?? fallbackData['full_place_name'],
+            };
+
+            print('✅ getPlaceDetails: Successfully parsed place details');
+            return result;
+          } else {
+            print(
+              '⚠️ getPlaceDetails: No features in API response, using fallback',
+            );
+            return fallbackData;
+          }
+        } else if (response.statusCode == 429) {
+          print(
+            '⚠️ getPlaceDetails: Rate limit exceeded (429), using fallback',
+          );
+          return fallbackData;
         } else {
-          return {
-            'country': '',
-            'region': '',
-            'district': '',
-            'locality': '',
-            'postcode': '',
-            'full_place_name': 'Unknown Location',
-          };
+          print(
+            '⚠️ getPlaceDetails: HTTP ${response.statusCode}, using fallback',
+          );
+          return fallbackData;
         }
-      } else {
-        throw Exception(
-          'Failed to get place details: HTTP ${response.statusCode}',
-        );
+      } finally {
+        client.close();
       }
+    } on TimeoutException catch (e) {
+      print('⏰ getPlaceDetails: Timeout error - ${e.message}');
+      return fallbackData;
+    } on SocketException catch (e) {
+      print('📶 getPlaceDetails: Network error - ${e.message}');
+      return fallbackData;
+    } on FormatException catch (e) {
+      print('📄 getPlaceDetails: JSON parsing error - ${e.message}');
+      return fallbackData;
     } catch (e) {
-      print('❌ getPlaceDetails: Error - $e');
-      rethrow;
+      print('❌ getPlaceDetails: Unexpected error - $e');
+      return fallbackData;
     }
   }
 
@@ -407,7 +683,17 @@ class _MainscreenState extends State<Mainscreen> {
     );
 
     try {
-      final response = await http.get(url);
+      final response = await http
+          .get(url)
+          .timeout(
+            const Duration(seconds: 15),
+            onTimeout: () {
+              throw TimeoutException(
+                'Route request timed out',
+                const Duration(seconds: 15),
+              );
+            },
+          );
 
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
@@ -453,7 +739,7 @@ class _MainscreenState extends State<Mainscreen> {
       await polylineAnnotationManager!.create(polylineAnnotationOptions);
       print("✅ Route drawn successfully");
     } catch (e) {
-      print("❌ Error drawing route: $e");
+      _handleError("Error drawing route", e);
     }
   }
 
@@ -526,7 +812,7 @@ class _MainscreenState extends State<Mainscreen> {
       );
       print("✅ Marker created: $title (${annotation.id})");
     } catch (e) {
-      print("❌ Error creating marker '$title': $e");
+      _handleError("Error creating marker '$title'", e);
     }
   }
 
@@ -562,13 +848,14 @@ class _MainscreenState extends State<Mainscreen> {
         MapAnimationOptions(duration: 1000),
       );
 
-      setState(() {
-        _suggestions = [];
-        _searchController.text = placeName;
-      });
+      if (mounted) {
+        setState(() {
+          _suggestions = [];
+          _searchController.text = placeName;
+        });
+      }
     } catch (e) {
-      print("❌ Error handling suggestion selection: $e");
-      _showErrorSnackBar('Error selecting location');
+      _handleError("Error handling suggestion selection", e);
     }
   }
 
@@ -592,17 +879,16 @@ class _MainscreenState extends State<Mainscreen> {
 
       await _drawRouteFromCurrentToDestination(latitude, longitude);
 
-      setState(() {
-        _suggestions = [];
-        _searchNavigationController.text = placeName;
-      });
-
       if (mounted) {
+        setState(() {
+          _suggestions = [];
+          _searchNavigationController.text = placeName;
+        });
+
         Navigator.of(context).pop();
       }
     } catch (e) {
-      print("❌ Error in navigation: $e");
-      _showErrorSnackBar('Navigation error: $e');
+      _handleError("Error in navigation", e);
     }
   }
 
@@ -614,9 +900,12 @@ class _MainscreenState extends State<Mainscreen> {
     try {
       final position = await geo.Geolocator.getCurrentPosition(
         desiredAccuracy: geo.LocationAccuracy.high,
+        timeLimit: const Duration(seconds: 10),
       );
 
-      setState(() => _currentPosition = position);
+      if (mounted) {
+        setState(() => _currentPosition = position);
+      }
 
       userpositionStream = geo.Geolocator.getPositionStream(
         locationSettings: const geo.LocationSettings(
@@ -624,24 +913,26 @@ class _MainscreenState extends State<Mainscreen> {
           distanceFilter: 10,
         ),
       ).listen((position) {
-        setState(() => _currentPosition = position);
+        if (mounted) {
+          setState(() => _currentPosition = position);
 
-        if (_mapboxMap != null && _isMapReady) {
-          _mapboxMap!.flyTo(
-            CameraOptions(
-              center: Point(
-                coordinates: Position(position.longitude, position.latitude),
+          if (_mapboxMap != null && _isMapReady) {
+            _mapboxMap!.flyTo(
+              CameraOptions(
+                center: Point(
+                  coordinates: Position(position.longitude, position.latitude),
+                ),
+                zoom: 15.0,
               ),
-              zoom: 15.0,
-            ),
-            MapAnimationOptions(duration: 300),
-          );
+              MapAnimationOptions(duration: 300),
+            );
+          }
         }
       });
 
       print("✅ Location initialized successfully");
     } catch (e) {
-      print("❌ Error initializing location: $e");
+      _handleError("Error initializing location", e);
     }
   }
 
@@ -678,20 +969,23 @@ class _MainscreenState extends State<Mainscreen> {
     try {
       final position = await geo.Geolocator.getCurrentPosition(
         desiredAccuracy: geo.LocationAccuracy.high,
+        timeLimit: const Duration(seconds: 10),
       );
 
-      setState(() => _currentPosition = position);
+      if (mounted) {
+        setState(() => _currentPosition = position);
 
-      if (moveCamera && _mapboxMap != null && _isMapReady) {
-        await _mapboxMap!.flyTo(
-          CameraOptions(
-            center: Point(
-              coordinates: Position(position.longitude, position.latitude),
+        if (moveCamera && _mapboxMap != null && _isMapReady) {
+          await _mapboxMap!.flyTo(
+            CameraOptions(
+              center: Point(
+                coordinates: Position(position.longitude, position.latitude),
+              ),
+              zoom: 15.0,
             ),
-            zoom: 15.0,
-          ),
-          MapAnimationOptions(duration: 1000),
-        );
+            MapAnimationOptions(duration: 1000),
+          );
+        }
       }
     } catch (e) {
       _showErrorSnackBar('Error getting location: $e');
@@ -701,7 +995,11 @@ class _MainscreenState extends State<Mainscreen> {
   // Show navigation bottom sheet
   Future<void> _showNavigationBottomSheet() async {
     _searchNavigationController.clear();
-    setState(() => _suggestions = []);
+    if (mounted) {
+      setState(() => _suggestions = []);
+    }
+
+    if (!mounted) return;
 
     showModalBottomSheet(
       context: context,
@@ -765,7 +1063,9 @@ class _MainscreenState extends State<Mainscreen> {
                                     icon: const Icon(Icons.clear),
                                     onPressed: () {
                                       _searchNavigationController.clear();
-                                      setState(() => _suggestions = []);
+                                      if (mounted) {
+                                        setState(() => _suggestions = []);
+                                      }
                                     },
                                   ),
                                 ),
@@ -885,7 +1185,7 @@ class _MainscreenState extends State<Mainscreen> {
         ),
       );
 
-      if (_currentPosition != null) {
+      if (_currentPosition != null && mounted) {
         await _mapboxMap!.flyTo(
           CameraOptions(
             center: Point(
@@ -903,21 +1203,218 @@ class _MainscreenState extends State<Mainscreen> {
       _isMapReady = true;
       print("✅ Map fully initialized and ready");
     } catch (e) {
-      print("❌ Error initializing map: $e");
-      _showErrorSnackBar('Error initializing map: $e');
+      _handleError('Error initializing map', e);
     }
   }
 
-  // Helper method to show error messages
+  // Helper methods for error handling and user feedback
+  void _handleError(String message, dynamic error) {
+    print('❌ $message: $error');
+    if (mounted) {
+      _showErrorSnackBar('$message: $error');
+    }
+  }
+
   void _showErrorSnackBar(String message) {
     if (mounted) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(message)));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Row(
+            children: [
+              const Icon(Icons.error, color: Colors.white),
+              const SizedBox(width: 8),
+              Expanded(child: Text(message)),
+            ],
+          ),
+          backgroundColor: Colors.red,
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(10),
+          ),
+          duration: const Duration(seconds: 4),
+        ),
+      );
     }
   }
 
-  // Build map page
+  void _showSuccessSnackBar(String message) {
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Row(
+            children: [
+              const Icon(Icons.check_circle, color: Colors.white),
+              const SizedBox(width: 8),
+              Expanded(child: Text(message)),
+            ],
+          ),
+          backgroundColor: Colors.green,
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(10),
+          ),
+          duration: const Duration(seconds: 3),
+        ),
+      );
+    }
+  }
+
+  Widget _buildDistanceTrackingIndicator() {
+    return Positioned(
+      top: 100,
+      left: 16,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        decoration: BoxDecoration(
+          color: _isTrackingDistance ? Colors.green : Colors.grey,
+          borderRadius: BorderRadius.circular(20),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.2),
+              blurRadius: 4,
+              offset: const Offset(0, 2),
+            ),
+          ],
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              _isTrackingDistance ? Icons.directions_run : Icons.pause,
+              color: Colors.white,
+              size: 16,
+            ),
+            const SizedBox(width: 6),
+            Text(
+              formattedTotalDistance,
+              style: const TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+                fontSize: 14,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // Build speed dial with optimized actions
+  Widget _buildSpeedDial() {
+    return SpeedDial(
+      animatedIcon: AnimatedIcons.menu_close,
+      animatedIconTheme: const IconThemeData(size: 24),
+      animationDuration: const Duration(milliseconds: 300),
+      animationCurve: Curves.easeInOut,
+      overlayOpacity: 0.4,
+      spaceBetweenChildren: 12,
+      children: [
+        SpeedDialChild(
+          child: Icon(
+            _isTrackingDistance ? Icons.pause : Icons.play_arrow,
+            size: 24,
+          ),
+          backgroundColor: _isTrackingDistance ? Colors.orange : Colors.green,
+          foregroundColor: Colors.white,
+          label: _isTrackingDistance ? 'Pause Tracking' : 'Resume Tracking',
+          labelStyle: const TextStyle(
+            fontWeight: FontWeight.w600,
+            fontSize: 16,
+            color: Colors.white,
+          ),
+          labelBackgroundColor: Colors.black87,
+          elevation: 6.0,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(28),
+          ),
+          onTap: () async {
+            HapticFeedback.mediumImpact();
+            if (_isTrackingDistance) {
+              await _stopDistanceTracking();
+            } else {
+              _resumeDistanceTracking();
+            }
+          },
+        ),
+        SpeedDialChild(
+          child: const Icon(Icons.my_location, size: 24),
+          backgroundColor: Colors.green,
+          foregroundColor: Colors.white,
+          label: 'Current Location',
+          labelStyle: const TextStyle(
+            fontWeight: FontWeight.w600,
+            fontSize: 16,
+            color: Colors.white,
+          ),
+          labelBackgroundColor: Colors.black87,
+          elevation: 6.0,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(28),
+          ),
+          onTap: () async {
+            HapticFeedback.mediumImpact();
+            await _getCurrentPosition(moveCamera: true);
+
+            await Future.delayed(const Duration(milliseconds: 150));
+
+            if (mounted) {
+              _showSuccessSnackBar('Getting current location...');
+            }
+          },
+        ),
+        SpeedDialChild(
+          child: const Icon(Icons.directions, size: 24),
+          backgroundColor: Colors.orange,
+          foregroundColor: Colors.white,
+          label: 'Get Directions',
+          labelStyle: const TextStyle(
+            fontWeight: FontWeight.w600,
+            fontSize: 16,
+            color: Colors.white,
+          ),
+          labelBackgroundColor: Colors.black87,
+          elevation: 6.0,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(28),
+          ),
+          onTap: () async {
+            HapticFeedback.mediumImpact();
+            await _showNavigationBottomSheet();
+
+            await Future.delayed(const Duration(milliseconds: 150));
+
+            if (mounted) {
+              _showSuccessSnackBar('Opening navigation...');
+            }
+          },
+        ),
+        SpeedDialChild(
+          child: const Icon(Icons.favorite, size: 24),
+          backgroundColor: Colors.red,
+          foregroundColor: Colors.white,
+          label: 'Add Favorite',
+          labelStyle: const TextStyle(
+            fontWeight: FontWeight.w600,
+            fontSize: 16,
+            color: Colors.white,
+          ),
+          labelBackgroundColor: Colors.black87,
+          elevation: 6.0,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(28),
+          ),
+          onTap: () async {
+            HapticFeedback.mediumImpact();
+            await saveplace();
+
+            await Future.delayed(const Duration(milliseconds: 150));
+          },
+        ),
+      ],
+    );
+  }
+
+  // Build map page with improved layout
   Widget _buildMapPage() {
     return Stack(
       children: [
@@ -926,219 +1423,12 @@ class _MainscreenState extends State<Mainscreen> {
           key: const ValueKey("mapWidget"),
           onMapCreated: _onMapCreated,
         ),
-        Positioned(
-          right: 16,
-          bottom: 16,
-          child: SpeedDial(
-            animatedIcon: AnimatedIcons.menu_close,
-            animatedIconTheme: const IconThemeData(size: 24),
-            // Add animation control
-            animationDuration: const Duration(milliseconds: 300),
-            animationCurve: Curves.easeInOut,
-            overlayOpacity: 0.4,
-            spaceBetweenChildren: 12,
 
-            children: [
-              SpeedDialChild(
-                child: const Icon(Icons.my_location, size: 24),
-                backgroundColor: Colors.green,
-                foregroundColor: Colors.white,
-                label: 'Current Location',
-                labelStyle: const TextStyle(
-                  fontWeight: FontWeight.w600,
-                  fontSize: 16,
-                  color: Colors.white,
-                ),
-                labelBackgroundColor: Colors.black87,
+        // Distance tracking indicator
+        _buildDistanceTrackingIndicator(),
 
-                // Enhanced visual properties
-                elevation: 6.0,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(
-                    28,
-                  ), // Better for animations
-                ),
-
-                // Optimized animation on tap
-                onTap: () async {
-                  // Add haptic feedback
-                  HapticFeedback.mediumImpact();
-
-                  // Execute your function
-                  _getCurrentPosition(moveCamera: true);
-
-                  // Delay SnackBar to prevent animation conflicts
-                  await Future.delayed(const Duration(milliseconds: 150));
-
-                  // Show feedback with proper context check
-                  if (context.mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(
-                        content: const Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(
-                              Icons.my_location,
-                              color: Colors.white,
-                              size: 20,
-                            ),
-                            SizedBox(width: 8),
-                            Text('Getting current location...'),
-                          ],
-                        ),
-                        backgroundColor: Colors.green,
-                        behavior: SnackBarBehavior.floating,
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                        duration: const Duration(seconds: 2),
-                        margin: const EdgeInsets.all(16),
-                      ),
-                    );
-                  }
-                },
-              ),
-
-              SpeedDialChild(
-                child: const Icon(Icons.directions, size: 24),
-                backgroundColor: Colors.orange,
-                foregroundColor: Colors.white,
-                label: 'Get Directions',
-                labelStyle: const TextStyle(
-                  fontWeight: FontWeight.w600,
-                  fontSize: 16,
-                  color: Colors.white,
-                ),
-                labelBackgroundColor: Colors.black87,
-
-                // Enhanced visual properties
-                elevation: 6.0,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(
-                    28,
-                  ), // Better for animations
-                ),
-
-                // Optimized animation on tap
-                onTap: () async {
-                  // Add haptic feedback
-                  HapticFeedback.mediumImpact();
-
-                  // Execute your function
-                  _showNavigationBottomSheet();
-
-                  // Delay SnackBar to prevent animation conflicts
-                  await Future.delayed(const Duration(milliseconds: 150));
-
-                  // Show feedback with proper context check
-                  if (context.mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(
-                        content: const Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(
-                              Icons.directions,
-                              color: Colors.white,
-                              size: 20,
-                            ),
-                            SizedBox(width: 8),
-                            Text('Opening navigation...'),
-                          ],
-                        ),
-                        backgroundColor: Colors.orange,
-                        behavior: SnackBarBehavior.floating,
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                        duration: const Duration(seconds: 2),
-                        margin: const EdgeInsets.all(16),
-                      ),
-                    );
-                  }
-                },
-              ),
-              SpeedDialChild(
-                child: const Icon(Icons.favorite, size: 24),
-                backgroundColor: Colors.white,
-                foregroundColor: Colors.black,
-                label: 'Add Favorite',
-                labelStyle: const TextStyle(
-                  fontWeight: FontWeight.w600,
-                  fontSize: 16,
-                  color: Colors.white,
-                ),
-                labelBackgroundColor: Colors.black87,
-
-                // Enhanced visual properties
-                elevation: 6.0,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(
-                    28,
-                  ), // Better for animations
-                ),
-
-                // Optimized animation on tap
-                onTap: () async {
-                  // Add haptic feedback
-                  HapticFeedback.mediumImpact();
-                  saveplace();
-
-                  // Execute your function
-
-                  // Delay SnackBar to prevent animation conflicts
-                  await Future.delayed(const Duration(milliseconds: 150));
-
-                  // Show feedback with proper context check
-                  if (context.mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(
-                        content: const Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(Icons.place, color: Colors.white, size: 20),
-                            SizedBox(width: 8),
-                            Text('Opening navigation...'),
-                          ],
-                        ),
-                        backgroundColor: Colors.orange,
-                        behavior: SnackBarBehavior.floating,
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                        duration: const Duration(seconds: 2),
-                        margin: const EdgeInsets.all(16),
-                      ),
-                    );
-                  }
-                },
-              ),
-            ],
-          ),
-        ),
-        // Current location button
-        // Positioned(
-        //   right: 16,
-        //   bottom: 16,
-        //   child: FloatingActionButton(
-        //     heroTag: "currentLocationBtn",
-        //     onPressed: () => _getCurrentPosition(moveCamera: true),
-        //     tooltip: 'Go to current location',
-        //     child: const Icon(Icons.my_location),
-        //   ),
-        // ),
-
-        // // Navigation button
-        // Positioned(
-        //   right: 16,
-        //   bottom: 80,
-        //   child: FloatingActionButton(
-        //     heroTag: "navigationBtn",
-        //     onPressed: _showNavigationBottomSheet,
-        //     tooltip: 'Navigate to location',
-        //     child: const Icon(Icons.navigation_outlined),
-        //   ),
-        // ),
+        // Speed dial
+        Positioned(right: 16, bottom: 16, child: _buildSpeedDial()),
 
         // Search interface
         Positioned(
@@ -1166,7 +1456,9 @@ class _MainscreenState extends State<Mainscreen> {
                       icon: const Icon(Icons.clear),
                       onPressed: () {
                         _searchController.clear();
-                        setState(() => _suggestions = []);
+                        if (mounted) {
+                          setState(() => _suggestions = []);
+                        }
                       },
                     ),
                   ),
@@ -1234,6 +1526,8 @@ class _MainscreenState extends State<Mainscreen> {
   // Get list of pages
   List<Widget> get _pages => [
     _buildMapPage(),
+    const FriendsPage(),
+    const GamePage(),
     const ChatsPage(),
     const ProfilePage(),
   ];
@@ -1244,24 +1538,44 @@ class _MainscreenState extends State<Mainscreen> {
       body: SafeArea(
         child: IndexedStack(index: _currentIndex, children: _pages),
       ),
-      bottomNavigationBar: CurvedNavigationBar(
-        index: _currentIndex,
-        height: 60.0,
-        items: const <Widget>[
-          Icon(Icons.map, size: 30),
-          Icon(Icons.search, size: 30),
-          Icon(Icons.person, size: 30),
-        ],
-        color: Colors.blue,
-        buttonBackgroundColor: Colors.white,
-        backgroundColor: Colors.transparent,
-        animationCurve: Curves.easeInOut,
-        animationDuration: const Duration(milliseconds: 300),
-        onTap: (index) {
-          setState(() {
-            _currentIndex = index;
-          });
-        },
+      bottomNavigationBar: Container(
+        decoration: BoxDecoration(
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.1),
+              blurRadius: 10,
+              offset: const Offset(0, -5),
+            ),
+          ],
+        ),
+        child: ClipRRect(
+          child: BackdropFilter(
+            filter: ui.ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+            child: CurvedNavigationBar(
+              index: _currentIndex,
+              height: 60.0,
+              items: const <Widget>[
+                Icon(Icons.map_outlined, size: 30),
+                Icon(Icons.people_alt_outlined, size: 30),
+                Icon(Icons.gamepad_outlined, size: 30),
+                Icon(Icons.chat_bubble_outline, size: 30),
+                Icon(Icons.person, size: 30),
+              ],
+              color: Colors.white.withOpacity(0.8),
+              buttonBackgroundColor: Colors.transparent,
+              backgroundColor: Colors.transparent,
+              animationCurve: Curves.easeInOut,
+              animationDuration: const Duration(milliseconds: 300),
+              onTap: (index) {
+                if (mounted) {
+                  setState(() {
+                    _currentIndex = index;
+                  });
+                }
+              },
+            ),
+          ),
+        ),
       ),
     );
   }

@@ -1,3 +1,5 @@
+// ignore_for_file: avoid_print
+
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'dart:math';
 
@@ -29,44 +31,280 @@ class UserStatsService {
   }
 
   static Future<int> _getPlacesCount(String userId) async {
-    final response = await _client
-        .from('user_places')
-        .select('id')
-        .eq('user_id', userId);
+    try {
+      final response = await _client
+          .from('user_places')
+          .select('id')
+          .eq('user_id', userId);
 
-    return response.length;
+      return response.length;
+    } catch (e) {
+      print('Error getting places count: $e');
+      return 0;
+    }
   }
 
   static Future<int> _getRoutesCount(String userId) async {
-    final response = await _client
-        .from('user_routes')
-        .select('id')
-        .eq('user_id', userId);
+    try {
+      final response = await _client
+          .from('user_routes')
+          .select('id')
+          .eq('user_id', userId);
 
-    return response.length;
+      return response.length;
+    } catch (e) {
+      print('Error getting routes count: $e');
+      return 0;
+    }
   }
 
   static Future<double> _getTotalDistance(String userId) async {
-    final response = await _client
-        .from('user_routes')
-        .select('distance_km')
-        .eq('user_id', userId);
+    try {
+      final response =
+          await _client
+              .from('user_stats')
+              .select('total_distance_km')
+              .eq('user_id', userId)
+              .maybeSingle();
 
-    double totalDistance = 0.0;
-    for (var route in response) {
-      totalDistance += (route['distance_km'] as num?)?.toDouble() ?? 0.0;
+      if (response != null && response['total_distance_km'] != null) {
+        return response['total_distance_km'].toDouble();
+      }
+
+      // If no user_stats record exists, create one
+      await _createUserStatsRecord(userId);
+      return 0.0;
+    } catch (e) {
+      print('❌ Error getting total distance: $e');
+      return 0.0;
     }
+  }
 
-    return totalDistance;
+  /// Create initial user stats record
+  static Future<void> _createUserStatsRecord(String userId) async {
+    try {
+      await _client.from('user_stats').insert({
+        'user_id': userId,
+        'total_distance_km': 0.0,
+        'total_places': 0,
+        'created_at': DateTime.now().toIso8601String(),
+        'updated_at': DateTime.now().toIso8601String(),
+      });
+    } catch (e) {
+      // If record already exists (race condition), ignore the error
+      if (e.toString().contains('duplicate key value')) {
+        print('ℹ️ User stats record already exists, continuing...');
+      } else {
+        rethrow;
+      }
+    }
+  }
+
+  /// Update user total distance with proper upsert handling
+  static Future<void> updateUserTotalDistance(double totalDistanceKm) async {
+    try {
+      final user = _client.auth.currentUser;
+      if (user == null) throw Exception('User not authenticated');
+
+      if (totalDistanceKm < 0) {
+        throw ArgumentError('Total distance cannot be negative');
+      }
+
+      // First, try to update existing record
+      final updateResponse = await _client.from('user_stats').upsert({
+        'user_id': user.id,
+        'total_distance_km': totalDistanceKm,
+        'updated_at': DateTime.now().toIso8601String(),
+        // Include created_at for new records
+        'created_at': DateTime.now().toIso8601String(),
+      }, onConflict: 'user_id'); // Add this line
+
+      // If no rows were affected, the record doesn't exist, so create it
+      if (updateResponse == null || updateResponse.isEmpty) {
+        try {
+          await _client.from('user_stats').insert({
+            'user_id': user.id,
+            'total_distance_km': totalDistanceKm,
+            'total_places': 0,
+            'created_at': DateTime.now().toIso8601String(),
+            'updated_at': DateTime.now().toIso8601String(),
+          });
+        } catch (insertError) {
+          // If insert fails due to race condition, try update again
+          if (insertError.toString().contains('duplicate key value')) {
+            await _client
+                .from('user_stats')
+                .update({
+                  'total_distance_km': totalDistanceKm,
+                  'updated_at': DateTime.now().toIso8601String(),
+                })
+                .eq('user_id', user.id);
+          } else {
+            rethrow;
+          }
+        }
+      }
+
+      print(
+        '💾 Updated total distance: ${totalDistanceKm.toStringAsFixed(2)} km',
+      );
+    } catch (e) {
+      print('❌ Error updating total distance: $e');
+      rethrow;
+    }
+  }
+
+  /// Alternative method using proper upsert with onConflict
+  static Future<void> updateUserTotalDistanceUpsert(
+    double totalDistanceKm,
+  ) async {
+    try {
+      final user = _client.auth.currentUser;
+      if (user == null) throw Exception('User not authenticated');
+
+      if (totalDistanceKm < 0) {
+        throw ArgumentError('Total distance cannot be negative');
+      }
+
+      // Use upsert with proper conflict resolution
+      await _client.from('user_stats').upsert({
+        'user_id': user.id,
+        'total_distance_km': totalDistanceKm,
+        'updated_at': DateTime.now().toIso8601String(),
+      }, onConflict: 'user_id'); // Specify the conflict column
+
+      print(
+        '💾 Updated total distance: ${totalDistanceKm.toStringAsFixed(2)} km',
+      );
+    } catch (e) {
+      print('❌ Error updating total distance: $e');
+      rethrow;
+    }
+  }
+
+  static Future<void> resetUserTotalDistance() async {
+    try {
+      final user = _client.auth.currentUser;
+      if (user == null) throw Exception('User not authenticated');
+
+      await _client
+          .from('user_stats')
+          .update({
+            'total_distance_km': 0.0,
+            'updated_at': DateTime.now().toIso8601String(),
+          })
+          .eq('user_id', user.id);
+
+      print('🔄 Total distance reset to 0');
+    } catch (e) {
+      print('❌ Error resetting total distance: $e');
+      rethrow;
+    }
+  }
+
+  static Future<Map<String, dynamic>> getDistanceStats() async {
+    try {
+      final user = _client.auth.currentUser;
+      if (user == null) throw Exception('User not authenticated');
+
+      final response =
+          await _client
+              .from('user_stats')
+              .select('total_distance_km, updated_at')
+              .eq('user_id', user.id)
+              .maybeSingle();
+
+      if (response != null) {
+        final totalDistance = response['total_distance_km']?.toDouble() ?? 0.0;
+        final lastUpdated =
+            response['updated_at'] != null
+                ? DateTime.parse(response['updated_at'])
+                : DateTime.now();
+
+        return {
+          'total_distance_km': totalDistance,
+          'total_distance_formatted': formatDistance(totalDistance),
+          'last_updated': lastUpdated,
+          'tracking_active':
+              DateTime.now().difference(lastUpdated).inMinutes < 5,
+        };
+      }
+
+      return {
+        'total_distance_km': 0.0,
+        'total_distance_formatted': '0 m',
+        'last_updated': DateTime.now(),
+        'tracking_active': false,
+      };
+    } catch (e) {
+      print('❌ Error getting distance stats: $e');
+      return {
+        'total_distance_km': 0.0,
+        'total_distance_formatted': '0 m',
+        'last_updated': DateTime.now(),
+        'tracking_active': false,
+      };
+    }
+  }
+
+  static Future<void> _updatePlacesCount(String userId) async {
+    try {
+      final placesCount = await _getPlacesCount(userId);
+
+      // Use the same update strategy to avoid conflicts
+      final updateResponse = await _client
+          .from('user_stats')
+          .update({
+            'total_places': placesCount,
+            'updated_at': DateTime.now().toIso8601String(),
+          })
+          .eq('user_id', userId);
+
+      // If no record exists, create one
+      if (updateResponse.isEmpty) {
+        try {
+          await _client.from('user_stats').insert({
+            'user_id': userId,
+            'total_distance_km': 0.0,
+            'total_places': placesCount,
+            'created_at': DateTime.now().toIso8601String(),
+            'updated_at': DateTime.now().toIso8601String(),
+          });
+        } catch (insertError) {
+          // Handle race condition
+          if (insertError.toString().contains('duplicate key value')) {
+            await _client
+                .from('user_stats')
+                .update({
+                  'total_places': placesCount,
+                  'updated_at': DateTime.now().toIso8601String(),
+                })
+                .eq('user_id', userId);
+          } else {
+            rethrow;
+          }
+        }
+      }
+    } catch (e) {
+      print('❌ Error updating places count: $e');
+    }
   }
 
   /// Calculate distance between two coordinates using Haversine formula
-  static double _calculateDistance(
+  static double calculateDistance(
     double lat1,
     double lon1,
     double lat2,
     double lon2,
   ) {
+    // Validate coordinates
+    if (!_isValidLatitude(lat1) ||
+        !_isValidLatitude(lat2) ||
+        !_isValidLongitude(lon1) ||
+        !_isValidLongitude(lon2)) {
+      throw ArgumentError('Invalid coordinates provided');
+    }
+
     const double earthRadius = 6371000; // Earth's radius in meters
 
     double dLat = _degreesToRadians(lat2 - lat1);
@@ -88,6 +326,14 @@ class UserStatsService {
     return degrees * (pi / 180);
   }
 
+  static bool _isValidLatitude(double latitude) {
+    return latitude >= -90.0 && latitude <= 90.0;
+  }
+
+  static bool _isValidLongitude(double longitude) {
+    return longitude >= -180.0 && longitude <= 180.0;
+  }
+
   /// Find a nearby place within the specified radius
   static Future<Map<String, dynamic>?> findNearbyPlace({
     required double latitude,
@@ -98,6 +344,10 @@ class UserStatsService {
     try {
       final user = _client.auth.currentUser;
       if (user == null) throw Exception('User not authenticated');
+
+      if (radiusMeters <= 0) {
+        throw ArgumentError('Radius must be positive');
+      }
 
       print(
         '🔍 findNearbyPlace: Searching for places near $latitude, $longitude',
@@ -117,7 +367,7 @@ class UserStatsService {
         final double placeLatitude = place['latitude'].toDouble();
         final double placeLongitude = place['longitude'].toDouble();
 
-        final double distance = _calculateDistance(
+        final double distance = calculateDistance(
           latitude,
           longitude,
           placeLatitude,
@@ -142,8 +392,37 @@ class UserStatsService {
     }
   }
 
-  /// Update visit count for an existing place
+  /// Update visit count for an existing place with optimistic concurrency
   static Future<bool> updatePlaceVisitCount(String placeId) async {
+    try {
+      final user = _client.auth.currentUser;
+      if (user == null) throw Exception('User not authenticated');
+
+      if (placeId.isEmpty) {
+        throw ArgumentError('Place ID cannot be empty');
+      }
+
+      // Use a single query to increment visit count atomically
+      final response = await _client.rpc(
+        'increment_place_visit',
+        params: {'place_id': placeId, 'user_id': user.id},
+      );
+
+      if (response == null || response == 0) {
+        print('❌ Place not found or not owned by user');
+        return false;
+      }
+
+      print('✅ Updated visit count for place $placeId');
+      return true;
+    } catch (e) {
+      // Fallback to the original method if RPC doesn't exist
+      return await _updatePlaceVisitCountFallback(placeId);
+    }
+  }
+
+  /// Fallback method for updating visit count
+  static Future<bool> _updatePlaceVisitCountFallback(String placeId) async {
     try {
       final user = _client.auth.currentUser;
       if (user == null) throw Exception('User not authenticated');
@@ -155,12 +434,17 @@ class UserStatsService {
               .select('visit_count')
               .eq('id', placeId)
               .eq('user_id', user.id)
-              .single();
+              .maybeSingle();
 
-      final currentVisitCount = currentPlace['visit_count'] as int;
+      if (currentPlace == null) {
+        print('❌ Place not found or not owned by user');
+        return false;
+      }
+
+      final currentVisitCount = currentPlace['visit_count'] as int? ?? 0;
 
       // Update with incremented visit count
-      final response = await _client
+      await _client
           .from('user_places')
           .update({
             'visit_count': currentVisitCount + 1,
@@ -188,20 +472,33 @@ class UserStatsService {
     String placeType = 'saved',
     double radiusMeters = 50.0,
   }) async {
-    final user = _client.auth.currentUser;
-    if (user == null) throw Exception('User not authenticated');
-
-    print('💾 savePlace: Starting to save place');
-    print('📍 Coordinates: $latitude, $longitude');
-    print('📝 Address: $address');
-
     try {
+      final user = _client.auth.currentUser;
+      if (user == null) throw Exception('User not authenticated');
+
+      // Validate inputs
+      if (placeName.trim().isEmpty) {
+        throw ArgumentError('Place name cannot be empty');
+      }
+      if (!_isValidLatitude(latitude) || !_isValidLongitude(longitude)) {
+        throw ArgumentError('Invalid coordinates');
+      }
+      if (radiusMeters <= 0) {
+        throw ArgumentError('Radius must be positive');
+      }
+
+      print('💾 savePlace: Starting to save place');
+      print('📍 Coordinates: $latitude, $longitude');
+      print('📝 Address: $address');
+
+      bool isNewPlace = true;
+
       // Check for nearby places first
-      if (address != null) {
+      if (address != null && address.trim().isNotEmpty) {
         final nearbyPlace = await findNearbyPlace(
           latitude: latitude,
           longitude: longitude,
-          address: address,
+          address: address.trim(),
           radiusMeters: radiusMeters,
         );
 
@@ -212,26 +509,33 @@ class UserStatsService {
 
           if (success) {
             print('✅ Successfully updated visit count for existing place');
-            return;
+            isNewPlace = false;
           } else {
             print('⚠️ Failed to update visit count, will save as new place');
           }
         }
       }
 
-      // If no nearby place found or address is null, save as new place
-      print('💾 Saving as new place...');
-      await _client.from('user_places').insert({
-        'user_id': user.id,
-        'place_name': placeName,
-        'latitude': latitude,
-        'longitude': longitude,
-        'address': address,
-        'place_type': placeType,
-        'visit_count': 1, // Initialize with 1 visit
-      });
+      if (isNewPlace) {
+        // If no nearby place found or address is null, save as new place
+        print('💾 Saving as new place...');
+        await _client.from('user_places').insert({
+          'user_id': user.id,
+          'place_name': placeName.trim(),
+          'latitude': latitude,
+          'longitude': longitude,
+          'address': address?.trim(),
+          'place_type': placeType,
+          'visit_count': 1, // Initialize with 1 visit
+          'created_at': DateTime.now().toIso8601String(),
+          'updated_at': DateTime.now().toIso8601String(),
+        });
 
-      print('✅ New place saved successfully');
+        print('✅ New place saved successfully');
+
+        // Update places count in user_stats
+        await _updatePlacesCount(user.id);
+      }
     } catch (e) {
       print('❌ Error in savePlace: $e');
       rethrow;
@@ -248,6 +552,10 @@ class UserStatsService {
     try {
       final user = _client.auth.currentUser;
       if (user == null) throw Exception('User not authenticated');
+
+      if (decimalPlaces < 1 || decimalPlaces > 10) {
+        throw ArgumentError('Decimal places must be between 1 and 10');
+      }
 
       final double roundedLat = roundCoordinate(latitude, decimalPlaces);
       final double roundedLon = roundCoordinate(longitude, decimalPlaces);
@@ -289,6 +597,7 @@ class UserStatsService {
 
   /// Round coordinates to reduce precision
   static double roundCoordinate(double coordinate, int decimalPlaces) {
+    if (decimalPlaces < 0) return coordinate;
     double multiplier = pow(10, decimalPlaces).toDouble();
     return (coordinate * multiplier).round() / multiplier;
   }
@@ -298,6 +607,10 @@ class UserStatsService {
     try {
       final user = _client.auth.currentUser;
       if (user == null) throw Exception('User not authenticated');
+
+      if (radiusMeters <= 0) {
+        throw ArgumentError('Radius must be positive');
+      }
 
       print('🔄 Starting duplicate cleanup process...');
 
@@ -326,7 +639,7 @@ class UserStatsService {
 
         print('🔍 Processing ${addressGroup.length} places for address group');
 
-        List<String> processedIds = [];
+        Set<String> processedIds = {};
 
         for (int i = 0; i < addressGroup.length; i++) {
           final place1 = addressGroup[i];
@@ -338,7 +651,7 @@ class UserStatsService {
             final place2 = addressGroup[j];
             if (processedIds.contains(place2['id'])) continue;
 
-            final distance = _calculateDistance(
+            final distance = calculateDistance(
               place1['latitude'].toDouble(),
               place1['longitude'].toDouble(),
               place2['latitude'].toDouble(),
@@ -386,30 +699,38 @@ class UserStatsService {
         }
       }
 
-      // Delete duplicate places in batches
+      // Delete duplicate places in batches for better performance
       if (idsToDelete.isNotEmpty) {
         print('🗑️ Deleting ${idsToDelete.length} duplicate places...');
 
-        // Alternative approach: Delete one by one if batch deletion doesn't work
-        for (final id in idsToDelete) {
+        // Delete in batches of 10 to avoid timeouts
+        const batchSize = 10;
+        int deletedCount = 0;
+
+        for (int i = 0; i < idsToDelete.length; i += batchSize) {
+          final batch = idsToDelete.skip(i).take(batchSize).toList();
+
           try {
-            await _client.from('user_places').delete().eq('id', id);
+            await _client.from('user_places').delete().inFilter('id', batch);
+            deletedCount += batch.length;
           } catch (e) {
-            print('⚠️ Failed to delete place $id: $e');
+            print('⚠️ Failed to delete batch: $e');
+            // Try individual deletes for this batch
+            for (final id in batch) {
+              try {
+                await _client.from('user_places').delete().eq('id', id);
+                deletedCount++;
+              } catch (individualError) {
+                print('⚠️ Failed to delete place $id: $individualError');
+              }
+            }
           }
         }
 
-        /* 
-        // Batch deletion approach (use this if inFilter works in your version)
-        const batchSize = 100;
-        for (int i = 0; i < idsToDelete.length; i += batchSize) {
-          final batch = idsToDelete.skip(i).take(batchSize).toList();
-          await _client
-              .from('user_places')
-              .delete()
-              .inFilter('id', batch);
-        }
-        */
+        print('✅ Successfully deleted $deletedCount duplicate places');
+
+        // Update places count after cleanup
+        await _updatePlacesCount(user.id);
       }
 
       print('✅ Cleanup complete: Merged $mergedCount duplicate places');
@@ -432,55 +753,99 @@ class UserStatsService {
     int? durationMinutes,
     String routeType = 'navigation',
   }) async {
-    final user = _client.auth.currentUser;
-    if (user == null) throw Exception('User not authenticated');
+    try {
+      final user = _client.auth.currentUser;
+      if (user == null) throw Exception('User not authenticated');
 
-    await _client.from('user_routes').insert({
-      'user_id': user.id,
-      'start_latitude': startLatitude,
-      'start_longitude': startLongitude,
-      'end_latitude': endLatitude,
-      'end_longitude': endLongitude,
-      'start_address': startAddress,
-      'end_address': endAddress,
-      'distance_km': distanceKm,
-      'duration_minutes': durationMinutes,
-      'route_type': routeType,
-    });
+      // Validate coordinates
+      if (!_isValidLatitude(startLatitude) ||
+          !_isValidLatitude(endLatitude) ||
+          !_isValidLongitude(startLongitude) ||
+          !_isValidLongitude(endLongitude)) {
+        throw ArgumentError('Invalid coordinates');
+      }
+
+      // Validate optional parameters
+      if (distanceKm != null && distanceKm < 0) {
+        throw ArgumentError('Distance cannot be negative');
+      }
+      if (durationMinutes != null && durationMinutes < 0) {
+        throw ArgumentError('Duration cannot be negative');
+      }
+
+      await _client.from('user_routes').insert({
+        'user_id': user.id,
+        'start_latitude': startLatitude,
+        'start_longitude': startLongitude,
+        'end_latitude': endLatitude,
+        'end_longitude': endLongitude,
+        'start_address': startAddress?.trim(),
+        'end_address': endAddress?.trim(),
+        'distance_km': distanceKm,
+        'duration_minutes': durationMinutes,
+        'route_type': routeType,
+        'created_at': DateTime.now().toIso8601String(),
+      });
+
+      print('✅ Route saved successfully');
+    } catch (e) {
+      print('❌ Error saving route: $e');
+      rethrow;
+    }
   }
 
   // Method to get recent places
   static Future<List<UserPlace>> getRecentPlaces({int limit = 10}) async {
-    final user = _client.auth.currentUser;
-    if (user == null) throw Exception('User not authenticated');
+    try {
+      final user = _client.auth.currentUser;
+      if (user == null) throw Exception('User not authenticated');
 
-    final response = await _client
-        .from('user_places')
-        .select('*')
-        .eq('user_id', user.id)
-        .order('updated_at', ascending: false)
-        .limit(limit);
+      if (limit <= 0) {
+        throw ArgumentError('Limit must be positive');
+      }
 
-    return response.map((place) => UserPlace.fromJson(place)).toList();
+      final response = await _client
+          .from('user_places')
+          .select('*')
+          .eq('user_id', user.id)
+          .order('updated_at', ascending: false)
+          .limit(limit);
+
+      return response.map((place) => UserPlace.fromJson(place)).toList();
+    } catch (e) {
+      print('❌ Error getting recent places: $e');
+      return [];
+    }
   }
 
   // Method to get recent routes
   static Future<List<UserRoute>> getRecentRoutes({int limit = 10}) async {
-    final user = _client.auth.currentUser;
-    if (user == null) throw Exception('User not authenticated');
+    try {
+      final user = _client.auth.currentUser;
+      if (user == null) throw Exception('User not authenticated');
 
-    final response = await _client
-        .from('user_routes')
-        .select('*')
-        .eq('user_id', user.id)
-        .order('created_at', ascending: false)
-        .limit(limit);
+      if (limit <= 0) {
+        throw ArgumentError('Limit must be positive');
+      }
 
-    return response.map((route) => UserRoute.fromJson(route)).toList();
+      final response = await _client
+          .from('user_routes')
+          .select('*')
+          .eq('user_id', user.id)
+          .order('created_at', ascending: false)
+          .limit(limit);
+
+      return response.map((route) => UserRoute.fromJson(route)).toList();
+    } catch (e) {
+      print('❌ Error getting recent routes: $e');
+      return [];
+    }
   }
 
   // Method to format distance for display
   static String formatDistance(double distanceKm) {
+    if (distanceKm < 0) return '0 m';
+
     if (distanceKm < 1.0) {
       return '${(distanceKm * 1000).toInt()} m';
     } else if (distanceKm < 10.0) {
@@ -515,6 +880,7 @@ class UserPlace {
   final String placeType;
   final int visitCount;
   final DateTime createdAt;
+  final DateTime? updatedAt;
 
   UserPlace({
     required this.id,
@@ -525,19 +891,41 @@ class UserPlace {
     required this.placeType,
     required this.visitCount,
     required this.createdAt,
+    this.updatedAt,
   });
 
   factory UserPlace.fromJson(Map<String, dynamic> json) {
     return UserPlace(
-      id: json['id'],
-      placeName: json['place_name'],
-      latitude: json['latitude'].toDouble(),
-      longitude: json['longitude'].toDouble(),
+      id: json['id'] ?? '',
+      placeName: json['place_name'] ?? '',
+      latitude: (json['latitude'] ?? 0.0).toDouble(),
+      longitude: (json['longitude'] ?? 0.0).toDouble(),
       address: json['address'],
-      placeType: json['place_type'],
+      placeType: json['place_type'] ?? 'saved',
       visitCount: json['visit_count'] ?? 1,
-      createdAt: DateTime.parse(json['created_at']),
+      createdAt:
+          json['created_at'] != null
+              ? DateTime.parse(json['created_at'])
+              : DateTime.now(),
+      updatedAt:
+          json['updated_at'] != null
+              ? DateTime.parse(json['updated_at'])
+              : null,
     );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'id': id,
+      'place_name': placeName,
+      'latitude': latitude,
+      'longitude': longitude,
+      'address': address,
+      'place_type': placeType,
+      'visit_count': visitCount,
+      'created_at': createdAt.toIso8601String(),
+      'updated_at': updatedAt?.toIso8601String(),
+    };
   }
 }
 
@@ -570,18 +958,37 @@ class UserRoute {
 
   factory UserRoute.fromJson(Map<String, dynamic> json) {
     return UserRoute(
-      id: json['id'],
-      startLatitude: json['start_latitude'].toDouble(),
-      startLongitude: json['start_longitude'].toDouble(),
-      endLatitude: json['end_latitude'].toDouble(),
-      endLongitude: json['end_longitude'].toDouble(),
+      id: json['id'] ?? '',
+      startLatitude: (json['start_latitude'] ?? 0.0).toDouble(),
+      startLongitude: (json['start_longitude'] ?? 0.0).toDouble(),
+      endLatitude: (json['end_latitude'] ?? 0.0).toDouble(),
+      endLongitude: (json['end_longitude'] ?? 0.0).toDouble(),
       startAddress: json['start_address'],
       endAddress: json['end_address'],
       distanceKm: json['distance_km']?.toDouble(),
       durationMinutes: json['duration_minutes'],
-      routeType: json['route_type'],
-      createdAt: DateTime.parse(json['created_at']),
+      routeType: json['route_type'] ?? 'navigation',
+      createdAt:
+          json['created_at'] != null
+              ? DateTime.parse(json['created_at'])
+              : DateTime.now(),
     );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'id': id,
+      'start_latitude': startLatitude,
+      'start_longitude': startLongitude,
+      'end_latitude': endLatitude,
+      'end_longitude': endLongitude,
+      'start_address': startAddress,
+      'end_address': endAddress,
+      'distance_km': distanceKm,
+      'duration_minutes': durationMinutes,
+      'route_type': routeType,
+      'created_at': createdAt.toIso8601String(),
+    };
   }
 
   String get formattedDistance =>
