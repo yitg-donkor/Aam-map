@@ -1,10 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:map/pages/log_in_page.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-
-// Make sure to import your LoginScreen or define it
-// import 'login_screen.dart';
+// ignore: unnecessary_import
 
 class SignUpScreen extends StatefulWidget {
   @override
@@ -16,6 +15,9 @@ class _SignUpScreenState extends State<SignUpScreen> {
   final _passwordController = TextEditingController();
   final _formKey = GlobalKey<FormState>();
   bool _isLoading = false;
+  bool _isFacebookLoading = false;
+
+  final SupabaseClient supabase = Supabase.instance.client;
 
   @override
   void dispose() {
@@ -37,7 +39,7 @@ class _SignUpScreenState extends State<SignUpScreen> {
       final email = _emailController.text.trim();
       final password = _passwordController.text;
 
-      final response = await Supabase.instance.client.auth.signUp(
+      final response = await supabase.auth.signUp(
         email: email,
         password: password,
       );
@@ -76,128 +78,234 @@ class _SignUpScreenState extends State<SignUpScreen> {
     }
   }
 
+  Future<void> _signInWithFacebook() async {
+    setState(() {
+      _isFacebookLoading = true;
+    });
+
+    try {
+      await supabase.auth.signInWithOAuth(
+        OAuthProvider.facebook,
+        redirectTo:
+            kIsWeb ? null : 'io.supabase.flutterquickstart://login-callback/',
+        authScreenLaunchMode:
+            kIsWeb
+                ? LaunchMode.platformDefault
+                : LaunchMode.externalApplication,
+      );
+    } on AuthException catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Facebook sign-in error: ${error.message}')),
+        );
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Unexpected error during Facebook sign-in')),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isFacebookLoading = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _signInWithGoogle() async {
+    // Similar implementation for Google sign-in
+    try {
+      await supabase.auth.signInWithOAuth(
+        OAuthProvider.google,
+        redirectTo:
+            kIsWeb ? null : 'io.supabase.flutterquickstart://login-callback/',
+        authScreenLaunchMode:
+            kIsWeb
+                ? LaunchMode.platformDefault
+                : LaunchMode.externalApplication,
+      );
+
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Google sign-in initiated...')));
+      }
+    } on AuthException catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Google sign-in error: ${error.message}')),
+        );
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Unexpected error during Google sign-in')),
+        );
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       body: SafeArea(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Padding(
-              padding: const EdgeInsets.all(16.0),
-              child: Form(
-                key: _formKey,
-                child: Column(
-                  children: [
-                    Text(
-                      'Create an Account',
-                      style: TextStyle(
-                        fontSize: 24,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    SizedBox(height: 50),
-                    TextFormField(
-                      controller: _emailController,
-                      decoration: InputDecoration(
-                        labelText: 'Email',
-                        border: OutlineInputBorder(),
-                      ),
-                      keyboardType: TextInputType.emailAddress,
-                      validator: (value) {
-                        if (value == null || value.isEmpty) {
-                          return 'Please enter your email';
-                        }
-                        if (!RegExp(
-                          r'^[\w-\.]+@([\w-]+\.)+[\w-]{2,4}$',
-                        ).hasMatch(value)) {
-                          return 'Please enter a valid email';
-                        }
-                        return null;
-                      },
-                    ),
-                    SizedBox(height: 16),
-                    TextFormField(
-                      controller: _passwordController,
-                      decoration: InputDecoration(
-                        labelText: 'Password',
-                        border: OutlineInputBorder(),
-                      ),
-                      obscureText: true,
-                      validator: (value) {
-                        if (value == null || value.isEmpty) {
-                          return 'Please enter your password';
-                        }
-                        if (value.length < 6) {
-                          return 'Password must be at least 6 characters';
-                        }
-                        return null;
-                      },
-                    ),
-                    SizedBox(height: 20),
-                    SizedBox(
-                      width: double.infinity,
-                      child: ElevatedButton(
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.blue,
-                          foregroundColor: Colors.white,
+        child: SingleChildScrollView(
+          child: Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                SizedBox(height: 50),
+                Form(
+                  key: _formKey,
+                  child: Column(
+                    children: [
+                      Text(
+                        'Create an Account',
+                        style: TextStyle(
+                          fontSize: 24,
+                          fontWeight: FontWeight.bold,
                         ),
-                        onPressed: _isLoading ? null : _signUp,
-                        child:
-                            _isLoading
-                                ? CircularProgressIndicator(color: Colors.white)
-                                : Text('Sign Up'),
                       ),
-                    ),
-
-                    TextButton(
-                      style: TextButton.styleFrom(foregroundColor: Colors.blue),
-                      onPressed: () {
-                        // Navigate to login screen
-                        Navigator.pushReplacement(
-                          context,
-                          MaterialPageRoute(builder: (_) => LoginScreen()),
-                        );
-                      },
-                      child: Text('Already have an account? Sign In'),
-                    ),
-                    Text('Or'),
-                    ElevatedButton(
-                      style: TextButton.styleFrom(
-                        backgroundColor: Colors.white,
-                        foregroundColor: Colors.black,
+                      SizedBox(height: 50),
+                      TextFormField(
+                        controller: _emailController,
+                        decoration: InputDecoration(
+                          labelText: 'Email',
+                          border: OutlineInputBorder(),
+                        ),
+                        keyboardType: TextInputType.emailAddress,
+                        validator: (value) {
+                          if (value == null || value.isEmpty) {
+                            return 'Please enter your email';
+                          }
+                          if (!RegExp(
+                            r'^[\w-\.]+@([\w-]+\.)+[\w-]{2,4}$',
+                          ).hasMatch(value)) {
+                            return 'Please enter a valid email';
+                          }
+                          return null;
+                        },
                       ),
-                      onPressed: () {},
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
+                      SizedBox(height: 16),
+                      TextFormField(
+                        controller: _passwordController,
+                        decoration: InputDecoration(
+                          labelText: 'Password',
+                          border: OutlineInputBorder(),
+                        ),
+                        obscureText: true,
+                        validator: (value) {
+                          if (value == null || value.isEmpty) {
+                            return 'Please enter your password';
+                          }
+                          if (value.length < 6) {
+                            return 'Password must be at least 6 characters';
+                          }
+                          return null;
+                        },
+                      ),
+                      SizedBox(height: 20),
+                      SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.blue,
+                            foregroundColor: Colors.white,
+                            padding: EdgeInsets.symmetric(vertical: 15),
+                          ),
+                          onPressed: _isLoading ? null : _signUp,
+                          child:
+                              _isLoading
+                                  ? CircularProgressIndicator(
+                                    color: Colors.white,
+                                  )
+                                  : Text('Sign Up'),
+                        ),
+                      ),
+                      SizedBox(height: 20),
+                      TextButton(
+                        style: TextButton.styleFrom(
+                          foregroundColor: Colors.blue,
+                        ),
+                        onPressed: () {
+                          Navigator.pushReplacement(
+                            context,
+                            MaterialPageRoute(builder: (_) => LoginScreen()),
+                          );
+                        },
+                        child: Text('Already have an account? Sign In'),
+                      ),
+                      SizedBox(height: 20),
+                      Row(
                         children: [
-                          FaIcon(FontAwesomeIcons.google, size: 15),
-
-                          SizedBox(width: 8),
-                          Text('Continue with Google'),
+                          Expanded(child: Divider()),
+                          Padding(
+                            padding: EdgeInsets.symmetric(horizontal: 16),
+                            child: Text('Or continue with'),
+                          ),
+                          Expanded(child: Divider()),
                         ],
                       ),
-                    ),
-                    ElevatedButton(
-                      style: TextButton.styleFrom(
-                        backgroundColor: Colors.white,
-                        foregroundColor: Colors.black,
+                      SizedBox(height: 20),
+                      SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.white,
+                            foregroundColor: Colors.black,
+                            side: BorderSide(color: Colors.grey.shade300),
+                            padding: EdgeInsets.symmetric(vertical: 15),
+                          ),
+                          onPressed: _signInWithGoogle,
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              FaIcon(FontAwesomeIcons.google, size: 18),
+                              SizedBox(width: 12),
+                              Text('Continue with Google'),
+                            ],
+                          ),
+                        ),
                       ),
-                      onPressed: () {},
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          FaIcon(FontAwesomeIcons.facebook),
-                          SizedBox(width: 8),
-                          Text('Continue with Facebook'),
-                        ],
+                      SizedBox(height: 12),
+                      SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Color(0xFF1877F2), // Facebook blue
+                            foregroundColor: Colors.white,
+                            padding: EdgeInsets.symmetric(vertical: 15),
+                          ),
+                          onPressed:
+                              _isFacebookLoading ? null : _signInWithFacebook,
+                          child:
+                              _isFacebookLoading
+                                  ? CircularProgressIndicator(
+                                    color: Colors.white,
+                                    strokeWidth: 2,
+                                  )
+                                  : Row(
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    children: [
+                                      FaIcon(
+                                        FontAwesomeIcons.facebook,
+                                        size: 18,
+                                      ),
+                                      SizedBox(width: 12),
+                                      Text('Continue with Facebook'),
+                                    ],
+                                  ),
+                        ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
-              ),
+              ],
             ),
-          ],
+          ),
         ),
       ),
     );

@@ -3,72 +3,154 @@ import 'package:map/pages/log_in_page.dart';
 import 'package:map/pages/mainscreen.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
-class Authwrapper extends StatefulWidget {
-  const Authwrapper({super.key});
+class AuthWrapper extends StatefulWidget {
+  const AuthWrapper({super.key});
 
   @override
-  State<Authwrapper> createState() => _AuthwrapperState();
+  State<AuthWrapper> createState() => _AuthWrapperState();
 }
 
-class _AuthwrapperState extends State<Authwrapper> {
+class _AuthWrapperState extends State<AuthWrapper> with WidgetsBindingObserver {
   bool _isLoading = true;
   Session? _session;
+  late final SupabaseClient _supabase;
 
   @override
   void initState() {
     super.initState();
+    _supabase = Supabase.instance.client;
+    WidgetsBinding.instance.addObserver(this);
     _getInitialSession();
     _setupAuthListener();
   }
 
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      // Handle deep link when app comes back to foreground
+      _supabase.auth.getSessionFromUrl(Uri.base);
+    }
+  }
+
   Future<void> _getInitialSession() async {
     try {
-      final session = Supabase.instance.client.auth.currentSession;
-      setState(() {
-        _session = session;
-        _isLoading = false;
-      });
+      final session = _supabase.auth.currentSession;
+      if (mounted) {
+        setState(() {
+          _session = session;
+          _isLoading = false;
+        });
+      }
     } catch (error) {
-      setState(() {
-        _session = null;
-        _isLoading = false;
-      });
+      debugPrint('Error getting initial session: $error');
+      if (mounted) {
+        setState(() {
+          _session = null;
+          _isLoading = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _handleDeepLink() async {
+    try {
+      await _supabase.auth.getSessionFromUrl(Uri.base);
+    } catch (error) {
+      debugPrint('Deep link handling error: $error');
     }
   }
 
   void _setupAuthListener() {
-    Supabase.instance.client.auth.onAuthStateChange.listen((data) {
-      final AuthChangeEvent event = data.event;
-      final Session? session = data.session;
+    _supabase.auth.onAuthStateChange.listen(
+      (data) {
+        final AuthChangeEvent event = data.event;
+        final Session? session = data.session;
 
-      setState(() {
-        _session = session;
-      });
+        if (mounted) {
+          setState(() {
+            _session = session;
+          });
+        }
 
-      // Optional: Handle specific auth events
-      switch (event) {
-        case AuthChangeEvent.signedIn:
-          print('User signed in');
-          break;
-        case AuthChangeEvent.signedOut:
-          print('User signed out');
-          break;
-        case AuthChangeEvent.tokenRefreshed:
-          print('Token refreshed');
-          break;
-        default:
-          break;
-      }
-    });
+        // Handle specific auth events with better feedback
+        switch (event) {
+          case AuthChangeEvent.signedIn:
+            debugPrint('User signed in: ${session?.user?.email}');
+            _showSnackBar('Welcome! Successfully signed in.', Colors.green);
+            break;
+          case AuthChangeEvent.signedOut:
+            debugPrint('User signed out');
+            _showSnackBar('You have been signed out.', Colors.orange);
+            break;
+          case AuthChangeEvent.tokenRefreshed:
+            debugPrint('Token refreshed');
+            break;
+          case AuthChangeEvent.userUpdated:
+            debugPrint('User updated');
+            break;
+          case AuthChangeEvent.passwordRecovery:
+            debugPrint('Password recovery initiated');
+            _showSnackBar('Password recovery email sent.', Colors.blue);
+            break;
+          default:
+            break;
+        }
+      },
+      onError: (error) {
+        debugPrint('Auth state change error: $error');
+        if (mounted) {
+          _showSnackBar('Authentication error occurred.', Colors.red);
+        }
+      },
+    );
   }
 
-  Widget build(BuildContext context) {
-    if (_isLoading) {
-      return const Center(child: CircularProgressIndicator());
+  void _showSnackBar(String message, Color backgroundColor) {
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(message),
+          backgroundColor: backgroundColor,
+          duration: const Duration(seconds: 3),
+        ),
+      );
     }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // Show loading screen while checking authentication state
+    if (_isLoading) {
+      return Scaffold(
+        body: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              CircularProgressIndicator(
+                valueColor: AlwaysStoppedAnimation<Color>(
+                  Theme.of(context).primaryColor,
+                ),
+              ),
+              const SizedBox(height: 16),
+              Text('Loading...', style: Theme.of(context).textTheme.bodyLarge),
+            ],
+          ),
+        ),
+      );
+    }
+
+    // Show main screen if user is authenticated
     if (_session != null) {
       return Mainscreen();
     }
+
+    // Show login screen if user is not authenticated
     return LoginScreen();
   }
 }

@@ -30,7 +30,7 @@ class MyApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       title: 'Map App',
       theme: ThemeData(primarySwatch: Colors.blue),
-      home: Authwrapper(),
+      home: AuthWrapper(),
     );
   }
 }

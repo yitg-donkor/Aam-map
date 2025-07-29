@@ -297,6 +297,7 @@ class _MainscreenState extends State<Mainscreen> with WidgetsBindingObserver {
     }
   }
 
+  // ignore: unused_element
   Future<void> _resetDistance() async {
     if (mounted) {
       setState(() {
