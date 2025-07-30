@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 import 'package:map/pages/log_in_page.dart';
 import 'package:map/pages/mainscreen.dart';
 import 'package:map/services/firebase_service.dart';
-import 'package:map/services/auth_bridge_service.dart';
 import 'package:supabase_flutter/supabase_flutter.dart' as supabase;
 
 class AuthWrapper extends StatefulWidget {
@@ -36,8 +35,8 @@ class _AuthWrapperState extends State<AuthWrapper> with WidgetsBindingObserver {
     _authSubscription.cancel();
 
     // Update offline status when app is closed
-    if (_session != null && AuthBridgeService.isAuthenticated) {
-      AuthBridgeService.updateOnlineStatus(false).catchError((error) {
+    if (_session != null) {
+      FirebaseService.updateOnlineStatus(false).catchError((error) {
         debugPrint('Error updating offline status: $error');
       });
     }
@@ -49,10 +48,10 @@ class _AuthWrapperState extends State<AuthWrapper> with WidgetsBindingObserver {
     super.didChangeAppLifecycleState(state);
 
     // Handle app state changes for online/offline status
-    if (_session != null && AuthBridgeService.isAuthenticated) {
+    if (_session != null) {
       switch (state) {
         case AppLifecycleState.resumed:
-          AuthBridgeService.updateOnlineStatus(true).catchError((error) {
+          FirebaseService.updateOnlineStatus(true).catchError((error) {
             debugPrint('Error updating online status: $error');
           });
           break;
@@ -60,7 +59,7 @@ class _AuthWrapperState extends State<AuthWrapper> with WidgetsBindingObserver {
         case AppLifecycleState.inactive:
         case AppLifecycleState.detached:
         case AppLifecycleState.hidden:
-          AuthBridgeService.updateOnlineStatus(false).catchError((error) {
+          FirebaseService.updateOnlineStatus(false).catchError((error) {
             debugPrint('Error updating offline status: $error');
           });
           break;
@@ -72,18 +71,16 @@ class _AuthWrapperState extends State<AuthWrapper> with WidgetsBindingObserver {
     try {
       debugPrint('🔄 Starting app initialization...');
 
-      // Initialize Firebase and Auth Bridge
+      // Initialize Firebase (Firestore only)
       try {
         await FirebaseService.initialize();
-        debugPrint('✅ Firebase and Auth Bridge initialized');
+        debugPrint('✅ Firebase initialized');
         _isInitialized = true;
       } catch (firebaseError) {
-        debugPrint(
-          '❌ Firebase/Auth Bridge initialization failed: $firebaseError',
-        );
+        debugPrint('❌ Firebase initialization failed: $firebaseError');
         if (mounted) {
           setState(() {
-            _errorMessage = 'Failed to initialize services: $firebaseError';
+            _errorMessage = 'Failed to initialize Firebase: $firebaseError';
             _isLoading = false;
           });
         }
@@ -126,8 +123,8 @@ class _AuthWrapperState extends State<AuthWrapper> with WidgetsBindingObserver {
           '   - Access token exists: ${session.accessToken.isNotEmpty}',
         );
 
-        // Wait for auth bridge to complete if user is signed in
-        await _waitForAuthBridge();
+        // Sync user to Firestore
+        await _syncUserToFirestore();
       }
 
       if (mounted) {
@@ -149,21 +146,16 @@ class _AuthWrapperState extends State<AuthWrapper> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _waitForAuthBridge() async {
-    // Wait up to 5 seconds for the auth bridge to complete
-    const maxWaitTime = Duration(seconds: 5);
-    const checkInterval = Duration(milliseconds: 100);
-    final startTime = DateTime.now();
-
-    while (DateTime.now().difference(startTime) < maxWaitTime) {
-      if (AuthBridgeService.isAuthenticated) {
-        debugPrint('✅ Auth bridge authentication completed');
-        return;
-      }
-      await Future.delayed(checkInterval);
+  Future<void> _syncUserToFirestore() async {
+    try {
+      debugPrint('🔄 Syncing user to Firestore...');
+      await FirebaseService.syncUserToFirebase();
+      await FirebaseService.updateOnlineStatus(true);
+      debugPrint('✅ User sync completed');
+    } catch (error) {
+      debugPrint('⚠️ Error syncing user to Firestore: $error');
+      // Don't let sync errors prevent main screen from showing
     }
-
-    debugPrint('⚠️ Auth bridge authentication timed out, but continuing...');
   }
 
   void _setupAuthListener() {
@@ -195,17 +187,8 @@ class _AuthWrapperState extends State<AuthWrapper> with WidgetsBindingObserver {
           case supabase.AuthChangeEvent.signedIn:
             debugPrint('✅ User signed in: ${session?.user?.email}');
             if (session != null && mounted) {
-              // Wait for auth bridge before showing success
-              await _waitForAuthBridge();
-
-              if (AuthBridgeService.isAuthenticated) {
-                _showSnackBar('Welcome! Successfully signed in.', Colors.green);
-              } else {
-                _showSnackBar(
-                  'Signed in, but some features may be limited.',
-                  Colors.orange,
-                );
-              }
+              await _syncUserToFirestore();
+              _showSnackBar('Welcome! Successfully signed in.', Colors.green);
             }
             break;
 
@@ -222,6 +205,7 @@ class _AuthWrapperState extends State<AuthWrapper> with WidgetsBindingObserver {
 
           case supabase.AuthChangeEvent.userUpdated:
             debugPrint('📝 User updated');
+            await _syncUserToFirestore();
             break;
 
           case supabase.AuthChangeEvent.passwordRecovery:
@@ -275,7 +259,9 @@ class _AuthWrapperState extends State<AuthWrapper> with WidgetsBindingObserver {
     debugPrint('   - Loading: $_isLoading');
     debugPrint('   - Session exists: ${_session != null}');
     debugPrint('   - Initialized: $_isInitialized');
-    debugPrint('   - Auth Bridge Ready: ${AuthBridgeService.isAuthenticated}');
+    debugPrint(
+      '   - Firebase Service Ready: ${FirebaseService.isAuthenticated}',
+    );
     debugPrint('   - Error: $_errorMessage');
     debugPrint('   - Mounted: $mounted');
 
@@ -302,7 +288,7 @@ class _AuthWrapperState extends State<AuthWrapper> with WidgetsBindingObserver {
               ),
               const SizedBox(height: 8),
               Text(
-                'Setting up secure connection',
+                'Setting up messaging services',
                 style: Theme.of(
                   context,
                 ).textTheme.bodyMedium?.copyWith(color: Colors.grey[500]),
@@ -367,40 +353,8 @@ class _AuthWrapperState extends State<AuthWrapper> with WidgetsBindingObserver {
       debugPrint('📺 Showing Mainscreen for user: ${_session!.user.email}');
       debugPrint('   - User ID: ${_session!.user.id}');
       debugPrint(
-        '   - Auth Bridge Status: ${AuthBridgeService.isAuthenticated}',
+        '   - Firebase Service Status: ${FirebaseService.isAuthenticated}',
       );
-
-      // Show warning if auth bridge is not ready
-      if (!AuthBridgeService.isAuthenticated) {
-        return Scaffold(
-          body: Center(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                CircularProgressIndicator(
-                  valueColor: AlwaysStoppedAnimation<Color>(
-                    Theme.of(context).primaryColor,
-                  ),
-                ),
-                const SizedBox(height: 24),
-                Text(
-                  'Setting up secure messaging...',
-                  style: Theme.of(
-                    context,
-                  ).textTheme.titleMedium?.copyWith(color: Colors.grey[600]),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  'This may take a few moments',
-                  style: Theme.of(
-                    context,
-                  ).textTheme.bodyMedium?.copyWith(color: Colors.grey[500]),
-                ),
-              ],
-            ),
-          ),
-        );
-      }
 
       return const Mainscreen();
     }

@@ -37,7 +37,9 @@ class _ChatsPageState extends State<ChatsPage>
             onPressed: () {
               Navigator.push(
                 context,
-                MaterialPageRoute(builder: (context) => const UsersScreen()),
+                MaterialPageRoute(
+                  builder: (context) => const UserSearchScreen(),
+                ),
               );
             },
             tooltip: 'Start new chat',
@@ -90,7 +92,7 @@ class _ChatsPageState extends State<ChatsPage>
         onPressed: () {
           Navigator.push(
             context,
-            MaterialPageRoute(builder: (context) => const UsersScreen()),
+            MaterialPageRoute(builder: (context) => const UserSearchScreen()),
           );
         },
         backgroundColor: Colors.blue,
@@ -221,7 +223,9 @@ class _ChatsPageState extends State<ChatsPage>
             onPressed: () {
               Navigator.push(
                 context,
-                MaterialPageRoute(builder: (context) => const UsersScreen()),
+                MaterialPageRoute(
+                  builder: (context) => const UserSearchScreen(),
+                ),
               );
             },
             icon: const Icon(Icons.person_add),

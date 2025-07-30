@@ -3,6 +3,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 
 class ChatUser {
   final String id;
+  final String username;
   final String email;
   final String name;
   final String? avatarUrl;
@@ -12,6 +13,7 @@ class ChatUser {
 
   ChatUser({
     required this.id,
+    required this.username,
     required this.email,
     required this.name,
     this.avatarUrl,
@@ -24,6 +26,7 @@ class ChatUser {
     final data = doc.data() as Map<String, dynamic>;
     return ChatUser(
       id: doc.id,
+      username: data['username'],
       email: data['email'] ?? '',
       name: data['name'] ?? '',
       avatarUrl: data['avatar_url'],
@@ -156,5 +159,20 @@ class Chat {
       return '${now.difference(messageTime).inDays}d';
 
     return '${messageTime.day}/${messageTime.month}';
+  }
+}
+
+extension ChatUserSupabase on ChatUser {
+  static ChatUser fromSupabase(Map<String, dynamic> data) {
+    return ChatUser(
+      id: data['id'],
+      username: data['username'],
+      email: '${data['username']}@example.com', // Placeholder
+      name: data['username'], // Using username as name
+      avatarUrl: data['avatar_url'],
+      isOnline: false,
+      lastSeen: null,
+      createdAt: null,
+    );
   }
 }

@@ -2,58 +2,98 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:map/data/chat_model.dart';
-import 'package:map/services/auth_bridge_service.dart';
 import 'package:supabase_flutter/supabase_flutter.dart' as supabase;
 
 class FirebaseService {
   static final FirebaseFirestore _firestore = FirebaseFirestore.instance;
+  static final supabase.SupabaseClient _supabase =
+      supabase.Supabase.instance.client;
 
-  // Initialize Firebase
+  // Initialize Firebase only
   static Future<void> initialize() async {
     await Firebase.initializeApp();
-    await AuthBridgeService.initialize();
+    print('✅ Firebase initialized (Firestore only)');
   }
 
-  // Get current user from AuthBridgeService
-  static String? get currentUserId => AuthBridgeService.currentUserId;
-  static bool get isAuthenticated => AuthBridgeService.isAuthenticated;
+  // Get current user from Supabase directly
+  static supabase.User? get currentUser => _supabase.auth.currentUser;
+  static String? get currentUserId => currentUser?.id;
+  static bool get isAuthenticated => currentUser != null;
 
-  // Get current Supabase user (use specific import to avoid conflicts)
-  static supabase.User? get currentUser =>
-      AuthBridgeService.currentSupabaseUser;
-
-  // Test Firebase connection
+  // Test Firestore connection
   static Future<bool> testFirebaseConnection() async {
     try {
-      final userId = currentUserId;
-      if (userId == null) {
+      final user = currentUser;
+      if (user == null) {
         print('❌ No user authenticated');
         return false;
       }
 
-      // Try to read from Firestore
-      final doc = await _firestore.collection('users').doc(userId).get();
-      print('✅ Firebase connection test successful');
+      // Try to read from Firestore (this will work with permissive rules)
+      final doc = await _firestore.collection('users').doc(user.id).get();
+      print('✅ Firestore connection test successful');
       print('   - User document exists: ${doc.exists}');
-      print('   - User ID: $userId');
+      print('   - User ID: ${user.id}');
+      print('   - User email: ${user.email}');
 
       return true;
     } catch (e) {
-      print('❌ Firebase connection test failed: $e');
+      print('❌ Firestore connection test failed: $e');
       return false;
+    }
+  }
+
+  // Sync user to Firestore (called manually)
+  static Future<void> syncUserToFirebase() async {
+    final user = currentUser;
+    if (user == null) return;
+
+    try {
+      await _firestore.collection('users').doc(user.id).set({
+        'id': user.id,
+        'email': user.email,
+        'name':
+            user.userMetadata?['name'] ?? user.email?.split('@')[0] ?? 'User',
+        'avatar_url': user.userMetadata?['avatar_url'],
+        'last_seen': FieldValue.serverTimestamp(),
+        'is_online': true,
+        'created_at': user.createdAt,
+        'updated_at': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+
+      print('✅ User synced to Firestore: ${user.email}');
+    } catch (e) {
+      print('❌ Error syncing user to Firestore: $e');
+      rethrow;
+    }
+  }
+
+  // Update user online status
+  static Future<void> updateOnlineStatus(bool isOnline) async {
+    final user = currentUser;
+    if (user == null) return;
+
+    try {
+      await _firestore.collection('users').doc(user.id).update({
+        'is_online': isOnline,
+        'last_seen': FieldValue.serverTimestamp(),
+      });
+      print('✅ Updated online status: $isOnline for ${user.email}');
+    } catch (e) {
+      print('❌ Error updating online status: $e');
     }
   }
 
   // Get unread message count for a user
   static Stream<int> getUnreadMessageCount() {
-    final userId = currentUserId;
-    if (userId == null) {
+    final user = currentUser;
+    if (user == null) {
       return Stream.value(0);
     }
 
     return _firestore
         .collection('chats')
-        .where('participants', arrayContains: userId)
+        .where('participants', arrayContains: user.id)
         .snapshots()
         .asyncMap((chatSnapshot) async {
           int totalUnread = 0;
@@ -62,7 +102,7 @@ class FirebaseService {
             final chat = Chat.fromFirestore(chatDoc);
 
             // Skip if current user sent the last message
-            if (chat.lastSenderId == userId) continue;
+            if (chat.lastSenderId == user.id) continue;
 
             // Count unread messages in this chat
             final unreadSnapshot =
@@ -70,8 +110,8 @@ class FirebaseService {
                     .collection('chats')
                     .doc(chatDoc.id)
                     .collection('messages')
-                    .where('sender_id', isNotEqualTo: userId)
-                    .where('read_by', whereNotIn: [userId])
+                    .where('sender_id', isNotEqualTo: user.id)
+                    .where('read_by', whereNotIn: [user.id])
                     .get();
 
             totalUnread += unreadSnapshot.docs.length;
@@ -86,8 +126,8 @@ class FirebaseService {
     String? name,
     String? avatarUrl,
   }) async {
-    final userId = currentUserId;
-    if (userId == null) return;
+    final user = currentUser;
+    if (user == null) return;
 
     try {
       final updates = <String, dynamic>{
@@ -97,17 +137,12 @@ class FirebaseService {
       if (name != null) updates['name'] = name;
       if (avatarUrl != null) updates['avatar_url'] = avatarUrl;
 
-      await _firestore.collection('users').doc(userId).update(updates);
+      await _firestore.collection('users').doc(user.id).update(updates);
       print('✅ User profile updated successfully');
     } catch (e) {
       print('❌ Error updating user profile: $e');
       rethrow;
     }
-  }
-
-  // Update user online status
-  static Future<void> updateOnlineStatus(bool isOnline) async {
-    await AuthBridgeService.updateOnlineStatus(isOnline);
   }
 
   // Send a message
@@ -116,9 +151,8 @@ class FirebaseService {
     required String message,
     String? imageUrl,
   }) async {
-    final userId = currentUserId;
-    final supabaseUser = AuthBridgeService.currentSupabaseUser;
-    if (userId == null || supabaseUser == null) return;
+    final user = currentUser;
+    if (user == null) return;
 
     try {
       await _firestore
@@ -126,36 +160,39 @@ class FirebaseService {
           .doc(chatId)
           .collection('messages')
           .add({
-            'sender_id': userId,
-            'sender_email': supabaseUser.email,
+            'sender_id': user.id,
+            'sender_email': user.email,
             'sender_name':
-                supabaseUser.userMetadata?['name'] ??
-                supabaseUser.email?.split('@')[0],
+                user.userMetadata?['name'] ??
+                user.email?.split('@')[0] ??
+                'User',
             'message': message,
             'image_url': imageUrl,
             'timestamp': FieldValue.serverTimestamp(),
-            'read_by': [userId], // Mark as read by sender
+            'read_by': [user.id], // Mark as read by sender
           });
 
       // Update chat's last message
       await _firestore.collection('chats').doc(chatId).set({
         'last_message': message.isNotEmpty ? message : '📷 Image',
         'last_message_time': FieldValue.serverTimestamp(),
-        'last_sender_id': userId,
+        'last_sender_id': user.id,
       }, SetOptions(merge: true));
+
+      print('✅ Message sent successfully');
     } catch (e) {
-      print('Error sending message: $e');
+      print('❌ Error sending message: $e');
       rethrow;
     }
   }
 
   // Create or get a chat between two users
   static Future<String> createOrGetChat(String otherUserId) async {
-    final userId = currentUserId;
-    if (userId == null) throw Exception('User not authenticated');
+    final user = currentUser;
+    if (user == null) throw Exception('User not authenticated');
 
     // Generate consistent chat ID
-    final List<String> userIds = [userId, otherUserId];
+    final List<String> userIds = [user.id, otherUserId];
     userIds.sort();
     final chatId = userIds.join('_');
 
@@ -168,13 +205,16 @@ class FirebaseService {
         await _firestore.collection('chats').doc(chatId).set({
           'participants': userIds,
           'created_at': FieldValue.serverTimestamp(),
-          'created_by': userId,
+          'created_by': user.id,
         });
+        print('✅ New chat created: $chatId');
+      } else {
+        print('✅ Existing chat found: $chatId');
       }
 
       return chatId;
     } catch (e) {
-      print('Error creating/getting chat: $e');
+      print('❌ Error creating/getting chat: $e');
       rethrow;
     }
   }
@@ -191,14 +231,14 @@ class FirebaseService {
 
   // Get user's chats stream
   static Stream<QuerySnapshot> getUserChatsStream() {
-    final userId = currentUserId;
-    if (userId == null) {
+    final user = currentUser;
+    if (user == null) {
       return const Stream.empty();
     }
 
     return _firestore
         .collection('chats')
-        .where('participants', arrayContains: userId)
+        .where('participants', arrayContains: user.id)
         .orderBy('last_message_time', descending: true)
         .snapshots();
   }
@@ -210,8 +250,8 @@ class FirebaseService {
 
   // Mark messages as read
   static Future<void> markMessagesAsRead(String chatId) async {
-    final userId = currentUserId;
-    if (userId == null) return;
+    final user = currentUser;
+    if (user == null) return;
 
     try {
       final unreadMessages =
@@ -219,20 +259,21 @@ class FirebaseService {
               .collection('chats')
               .doc(chatId)
               .collection('messages')
-              .where('read_by', whereNotIn: [userId])
+              .where('read_by', whereNotIn: [user.id])
               .get();
 
       final batch = _firestore.batch();
 
       for (final doc in unreadMessages.docs) {
         batch.update(doc.reference, {
-          'read_by': FieldValue.arrayUnion([userId]),
+          'read_by': FieldValue.arrayUnion([user.id]),
         });
       }
 
       await batch.commit();
+      print('✅ Messages marked as read');
     } catch (e) {
-      print('Error marking messages as read: $e');
+      print('❌ Error marking messages as read: $e');
     }
   }
 
@@ -249,7 +290,7 @@ class FirebaseService {
 
       return snapshot.docs.map((doc) => {...doc.data(), 'id': doc.id}).toList();
     } catch (e) {
-      print('Error searching users: $e');
+      print('❌ Error searching users: $e');
       return [];
     }
   }
@@ -263,8 +304,9 @@ class FirebaseService {
           .collection('messages')
           .doc(messageId)
           .delete();
+      print('✅ Message deleted');
     } catch (e) {
-      print('Error deleting message: $e');
+      print('❌ Error deleting message: $e');
       rethrow;
     }
   }

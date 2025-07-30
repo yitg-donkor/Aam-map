@@ -1,246 +1,366 @@
-// lib/services/auth_bridge_service.dart
 import 'dart:async';
-import 'package:firebase_auth/firebase_auth.dart' as firebase_auth;
+
+import 'package:flutter/material.dart';
+import 'package:map/pages/log_in_page.dart';
+import 'package:map/pages/mainscreen.dart';
+import 'package:map/services/firebase_service.dart';
 import 'package:supabase_flutter/supabase_flutter.dart' as supabase;
-import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:flutter/foundation.dart';
 
-class AuthBridgeService {
-  static final firebase_auth.FirebaseAuth _firebaseAuth =
-      firebase_auth.FirebaseAuth.instance;
-  static final supabase.SupabaseClient _supabase =
-      supabase.Supabase.instance.client;
-  static final FirebaseFirestore _firestore = FirebaseFirestore.instance;
+class AuthWrapper extends StatefulWidget {
+  const AuthWrapper({super.key});
 
-  static StreamSubscription<supabase.AuthState>? _authSubscription;
-  static bool _isInitialized = false;
-  static String? _lastSyncedUserId;
+  @override
+  State<AuthWrapper> createState() => _AuthWrapperState();
+}
 
-  // Get current Supabase user
-  static supabase.User? get currentSupabaseUser => _supabase.auth.currentUser;
+class _AuthWrapperState extends State<AuthWrapper> with WidgetsBindingObserver {
+  bool _isLoading = true;
+  bool _isInitialized = false;
+  supabase.Session? _session;
+  String? _errorMessage;
+  late final supabase.SupabaseClient _supabase;
+  late final StreamSubscription<supabase.AuthState> _authSubscription;
 
-  // Get current Firebase user
-  static firebase_auth.User? get currentFirebaseUser =>
-      _firebaseAuth.currentUser;
+  @override
+  void initState() {
+    super.initState();
+    _supabase = supabase.Supabase.instance.client;
+    WidgetsBinding.instance.addObserver(this);
+    _initializeApp();
+  }
 
-  /// Initialize the auth bridge - call this when your app starts
-  static Future<void> initialize() async {
-    if (_isInitialized) return;
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _authSubscription.cancel();
 
+    // Update offline status when app is closed
+    if (_session != null) {
+      FirebaseService.updateOnlineStatus(false).catchError((error) {
+        debugPrint('Error updating offline status: $error');
+      });
+    }
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+
+    // Handle app state changes for online/offline status
+    if (_session != null) {
+      switch (state) {
+        case AppLifecycleState.resumed:
+          FirebaseService.updateOnlineStatus(true).catchError((error) {
+            debugPrint('Error updating online status: $error');
+          });
+          break;
+        case AppLifecycleState.paused:
+        case AppLifecycleState.inactive:
+        case AppLifecycleState.detached:
+        case AppLifecycleState.hidden:
+          FirebaseService.updateOnlineStatus(false).catchError((error) {
+            debugPrint('Error updating offline status: $error');
+          });
+          break;
+      }
+    }
+  }
+
+  Future<void> _initializeApp() async {
     try {
-      debugPrint('🔄 Initializing Auth Bridge...');
+      debugPrint('🔄 Starting app initialization...');
 
-      // Listen to Supabase auth changes
-      _authSubscription = _supabase.auth.onAuthStateChange.listen((data) {
-        final event = data.event;
-        final user = data.session?.user;
-
-        debugPrint('🔔 Auth Bridge: Supabase auth changed - $event');
-
-        if (event == supabase.AuthChangeEvent.signedIn && user != null) {
-          _signInToFirebase(user);
-        } else if (event == supabase.AuthChangeEvent.signedOut) {
-          _signOutFromFirebase();
-        } else if (event == supabase.AuthChangeEvent.userUpdated &&
-            user != null) {
-          _syncUserToFirestore(user);
+      // Initialize Firebase (Firestore only)
+      try {
+        await FirebaseService.initialize();
+        debugPrint('✅ Firebase initialized');
+        _isInitialized = true;
+      } catch (firebaseError) {
+        debugPrint('❌ Firebase initialization failed: $firebaseError');
+        if (mounted) {
+          setState(() {
+            _errorMessage = 'Failed to initialize Firebase: $firebaseError';
+            _isLoading = false;
+          });
         }
-      });
-
-      // If user is already signed in to Supabase, sign them into Firebase
-      final currentUser = currentSupabaseUser;
-      if (currentUser != null) {
-        debugPrint('🔍 Found existing Supabase user, syncing to Firebase...');
-        await _signInToFirebase(currentUser);
-      }
-
-      _isInitialized = true;
-      debugPrint('✅ Auth Bridge initialized successfully');
-    } catch (e) {
-      debugPrint('❌ Auth Bridge initialization failed: $e');
-      rethrow;
-    }
-  }
-
-  /// Clean up the auth bridge
-  static Future<void> dispose() async {
-    await _authSubscription?.cancel();
-    _authSubscription = null;
-    _isInitialized = false;
-    _lastSyncedUserId = null;
-    debugPrint('🧹 Auth Bridge disposed');
-  }
-
-  /// Sign in to Firebase using Supabase user data
-  static Future<void> _signInToFirebase(supabase.User supabaseUser) async {
-    try {
-      debugPrint('🔄 Signing in to Firebase for user: ${supabaseUser.email}');
-
-      // Check if already signed in to Firebase
-      final currentFirebaseUser = _firebaseAuth.currentUser;
-      if (currentFirebaseUser != null) {
-        debugPrint('✅ Already signed in to Firebase');
-        await _syncUserToFirestore(supabaseUser);
         return;
       }
 
-      // Sign in anonymously to Firebase (this gives us Firebase Auth context)
-      final credential = await _firebaseAuth.signInAnonymously();
-      debugPrint('✅ Firebase anonymous sign-in successful');
+      // Get initial session
+      await _getInitialSession();
 
-      // Sync user data to Firestore
-      await _syncUserToFirestore(supabaseUser);
+      // Setup auth listener
+      _setupAuthListener();
+
+      debugPrint('✅ App initialization complete');
+    } catch (error) {
+      debugPrint('❌ Error initializing app: $error');
+      if (mounted) {
+        setState(() {
+          _errorMessage = 'Initialization failed: $error';
+          _session = null;
+          _isLoading = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _getInitialSession() async {
+    try {
+      final session = _supabase.auth.currentSession;
 
       debugPrint(
-        '✅ Firebase auth bridge setup complete for: ${supabaseUser.email}',
+        '🔍 Initial session check: ${session?.user?.email ?? "No session found"}',
       );
-    } catch (e) {
-      debugPrint('❌ Error signing in to Firebase: $e');
-      // Don't rethrow - allow app to continue even if Firebase auth fails
-    }
-  }
 
-  /// Sign out from Firebase
-  static Future<void> _signOutFromFirebase() async {
-    try {
-      // Update offline status before signing out
-      final supabaseUser = currentSupabaseUser;
-      if (supabaseUser != null) {
-        await _updateOfflineStatus(supabaseUser.id);
+      if (session != null) {
+        debugPrint('📋 Session details:');
+        debugPrint('   - User ID: ${session.user.id}');
+        debugPrint('   - Email: ${session.user.email}');
+        debugPrint('   - Expires at: ${session.expiresAt}');
+        debugPrint(
+          '   - Access token exists: ${session.accessToken.isNotEmpty}',
+        );
+
+        // Sync user to Firestore
+        await _syncUserToFirestore();
       }
 
-      await _firebaseAuth.signOut();
-      _lastSyncedUserId = null;
-      debugPrint('✅ Signed out from Firebase');
-    } catch (e) {
-      debugPrint('❌ Error signing out from Firebase: $e');
-    }
-  }
-
-  /// Sync Supabase user data to Firestore
-  static Future<void> _syncUserToFirestore(supabase.User supabaseUser) async {
-    try {
-      // Avoid unnecessary syncs
-      if (_lastSyncedUserId == supabaseUser.id) {
-        debugPrint('⏭️ User already synced, skipping...');
-        return;
+      if (mounted) {
+        setState(() {
+          _session = session;
+          _isLoading = false;
+          _errorMessage = null;
+        });
       }
-
-      debugPrint('🔄 Syncing user to Firestore: ${supabaseUser.email}');
-
-      // Use Supabase user ID as the document ID in Firestore
-      await _firestore.collection('users').doc(supabaseUser.id).set({
-        'id': supabaseUser.id,
-        'email': supabaseUser.email,
-        'name':
-            supabaseUser.userMetadata?['name'] ??
-            supabaseUser.email?.split('@')[0] ??
-            'User',
-        'avatar_url': supabaseUser.userMetadata?['avatar_url'],
-        'last_seen': FieldValue.serverTimestamp(),
-        'is_online': true,
-        'created_at': supabaseUser.createdAt,
-        'updated_at': FieldValue.serverTimestamp(),
-      }, SetOptions(merge: true));
-
-      _lastSyncedUserId = supabaseUser.id;
-      debugPrint('✅ User synced to Firestore: ${supabaseUser.email}');
-    } catch (e) {
-      debugPrint('❌ Error syncing user to Firestore: $e');
-      // Don't rethrow - allow app to continue
+    } catch (error) {
+      debugPrint('❌ Error getting initial session: $error');
+      if (mounted) {
+        setState(() {
+          _session = null;
+          _isLoading = false;
+          _errorMessage = 'Session error: $error';
+        });
+      }
     }
   }
 
-  /// Update user online status
-  static Future<void> updateOnlineStatus(bool isOnline) async {
-    final supabaseUser = currentSupabaseUser;
-    if (supabaseUser == null) {
-      debugPrint('⚠️ Cannot update online status - no authenticated user');
-      return;
+  Future<void> _syncUserToFirestore() async {
+    try {
+      debugPrint('🔄 Syncing user to Firestore...');
+      await FirebaseService.syncUserToFirebase();
+      await FirebaseService.updateOnlineStatus(true);
+      debugPrint('✅ User sync completed');
+    } catch (error) {
+      debugPrint('⚠️ Error syncing user to Firestore: $error');
+      // Don't let sync errors prevent main screen from showing
+    }
+  }
+
+  void _setupAuthListener() {
+    debugPrint('🎧 Setting up auth state listener...');
+
+    _authSubscription = _supabase.auth.onAuthStateChange.listen(
+      (data) async {
+        final supabase.AuthChangeEvent event = data.event;
+        final supabase.Session? session = data.session;
+
+        debugPrint('🔔 Auth state changed: $event');
+        debugPrint('   User: ${session?.user?.email ?? "No user"}');
+        debugPrint('   Session exists: ${session != null}');
+        debugPrint('   Widget mounted: $mounted');
+
+        if (mounted) {
+          debugPrint('🔄 Updating state with new session...');
+          setState(() {
+            _session = session;
+            _errorMessage = null;
+          });
+          debugPrint(
+            '✅ State updated. Current session: ${_session != null ? "EXISTS" : "NULL"}',
+          );
+        }
+
+        // Handle specific auth events
+        switch (event) {
+          case supabase.AuthChangeEvent.signedIn:
+            debugPrint('✅ User signed in: ${session?.user?.email}');
+            if (session != null && mounted) {
+              await _syncUserToFirestore();
+              _showSnackBar('Welcome! Successfully signed in.', Colors.green);
+            }
+            break;
+
+          case supabase.AuthChangeEvent.signedOut:
+            debugPrint('👋 User signed out');
+            if (mounted) {
+              _showSnackBar('You have been signed out.', Colors.orange);
+            }
+            break;
+
+          case supabase.AuthChangeEvent.tokenRefreshed:
+            debugPrint('🔄 Token refreshed');
+            break;
+
+          case supabase.AuthChangeEvent.userUpdated:
+            debugPrint('📝 User updated');
+            await _syncUserToFirestore();
+            break;
+
+          case supabase.AuthChangeEvent.passwordRecovery:
+            debugPrint('🔑 Password recovery initiated');
+            if (mounted) {
+              _showSnackBar('Password recovery email sent.', Colors.blue);
+            }
+            break;
+
+          default:
+            debugPrint('❓ Unknown auth event: $event');
+            break;
+        }
+      },
+      onError: (error) {
+        debugPrint('❌ Auth state change error: $error');
+        if (mounted) {
+          setState(() {
+            _errorMessage = 'Authentication error: $error';
+          });
+          _showSnackBar('Authentication error occurred.', Colors.red);
+        }
+      },
+    );
+  }
+
+  void _showSnackBar(String message, Color backgroundColor) {
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(message),
+          backgroundColor: backgroundColor,
+          duration: const Duration(seconds: 3),
+        ),
+      );
+    }
+  }
+
+  Future<void> _retryInitialization() async {
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+    });
+
+    await _initializeApp();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    debugPrint('🎨 Building AuthWrapper...');
+    debugPrint('   - Loading: $_isLoading');
+    debugPrint('   - Session exists: ${_session != null}');
+    debugPrint('   - Initialized: $_isInitialized');
+    debugPrint(
+      '   - Firebase Service Ready: ${FirebaseService.isAuthenticated}',
+    );
+    debugPrint('   - Error: $_errorMessage');
+    debugPrint('   - Mounted: $mounted');
+
+    // Show loading screen while initializing
+    if (_isLoading) {
+      debugPrint('📺 Showing loading screen');
+      return Scaffold(
+        backgroundColor: Colors.white,
+        body: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              CircularProgressIndicator(
+                valueColor: AlwaysStoppedAnimation<Color>(
+                  Theme.of(context).primaryColor,
+                ),
+              ),
+              const SizedBox(height: 24),
+              Text(
+                'Initializing...',
+                style: Theme.of(
+                  context,
+                ).textTheme.titleMedium?.copyWith(color: Colors.grey[600]),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Setting up messaging services',
+                style: Theme.of(
+                  context,
+                ).textTheme.bodyMedium?.copyWith(color: Colors.grey[500]),
+              ),
+            ],
+          ),
+        ),
+      );
     }
 
-    try {
-      await _firestore.collection('users').doc(supabaseUser.id).update({
-        'is_online': isOnline,
-        'last_seen': FieldValue.serverTimestamp(),
-      });
+    // Show error screen if initialization failed
+    if (_errorMessage != null && !_isInitialized) {
+      debugPrint('📺 Showing error screen');
+      return Scaffold(
+        backgroundColor: Colors.white,
+        body: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24.0),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(Icons.error_outline, size: 64, color: Colors.red[400]),
+                const SizedBox(height: 24),
+                Text(
+                  'Initialization Failed',
+                  style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                    color: Colors.red[700],
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Text(
+                  _errorMessage!,
+                  textAlign: TextAlign.center,
+                  style: Theme.of(
+                    context,
+                  ).textTheme.bodyMedium?.copyWith(color: Colors.grey[600]),
+                ),
+                const SizedBox(height: 32),
+                ElevatedButton.icon(
+                  onPressed: _retryInitialization,
+                  icon: const Icon(Icons.refresh),
+                  label: const Text('Retry'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Theme.of(context).primaryColor,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 24,
+                      vertical: 12,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    // Show main screen if user is authenticated
+    if (_session != null) {
+      debugPrint('📺 Showing Mainscreen for user: ${_session!.user.email}');
+      debugPrint('   - User ID: ${_session!.user.id}');
       debugPrint(
-        '✅ Updated online status: $isOnline for ${supabaseUser.email}',
+        '   - Firebase Service Status: ${FirebaseService.isAuthenticated}',
       );
-    } catch (e) {
-      debugPrint('❌ Error updating online status: $e');
-    }
-  }
 
-  /// Update offline status specifically
-  static Future<void> _updateOfflineStatus(String userId) async {
-    try {
-      await _firestore.collection('users').doc(userId).update({
-        'is_online': false,
-        'last_seen': FieldValue.serverTimestamp(),
-      });
-      debugPrint('✅ Updated offline status for user: $userId');
-    } catch (e) {
-      debugPrint('❌ Error updating offline status: $e');
-    }
-  }
-
-  /// Check if user is properly authenticated
-  static bool get isAuthenticated {
-    final supabaseUser = currentSupabaseUser;
-    final firebaseUser = currentFirebaseUser;
-    final isAuth = supabaseUser != null && firebaseUser != null;
-
-    if (!isAuth) {
-      debugPrint('⚠️ Authentication check failed:');
-      debugPrint('   - Supabase user: ${supabaseUser?.email ?? "null"}');
-      debugPrint('   - Firebase user: ${firebaseUser?.uid ?? "null"}');
+      return const Mainscreen();
     }
 
-    return isAuth;
-  }
-
-  /// Get current user ID (using Supabase ID)
-  static String? get currentUserId => currentSupabaseUser?.id;
-
-  /// Test the auth bridge connection
-  static Future<bool> testConnection() async {
-    try {
-      final supabaseUser = currentSupabaseUser;
-      if (supabaseUser == null) {
-        debugPrint('❌ Auth Bridge Test: No Supabase user');
-        return false;
-      }
-
-      final firebaseUser = currentFirebaseUser;
-      if (firebaseUser == null) {
-        debugPrint('❌ Auth Bridge Test: No Firebase user');
-        return false;
-      }
-
-      // Test Firestore access
-      final doc =
-          await _firestore.collection('users').doc(supabaseUser.id).get();
-
-      debugPrint('✅ Auth Bridge Test Results:');
-      debugPrint('   - Supabase User: ${supabaseUser.email}');
-      debugPrint('   - Firebase User: ${firebaseUser.uid}');
-      debugPrint('   - Firestore Doc Exists: ${doc.exists}');
-      debugPrint('   - Is Authenticated: $isAuthenticated');
-
-      return true;
-    } catch (e) {
-      debugPrint('❌ Auth Bridge Test Failed: $e');
-      return false;
-    }
-  }
-
-  /// Force sync current user (useful for troubleshooting)
-  static Future<void> forceSyncUser() async {
-    final user = currentSupabaseUser;
-    if (user != null) {
-      _lastSyncedUserId = null; // Reset to force sync
-      await _syncUserToFirestore(user);
-    }
+    // Show login screen if user is not authenticated
+    debugPrint('📺 Showing LoginScreen - no authenticated user');
+    return const LoginScreen();
   }
 }
