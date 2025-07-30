@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "671797942909",
+    "project_id": "map-app-7c74e",
+    "storage_bucket": "map-app-7c74e.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:671797942909:android:d279bd743641a8b356af14",
+        "android_client_info": {
+          "package_name": "com.example.map"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyB7GS2hAjRBmwaTz04s1qE3dL1hXnCQdiw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

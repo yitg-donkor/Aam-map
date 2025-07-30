@@ -49,6 +49,7 @@ class _MainscreenState extends State<Mainscreen> with WidgetsBindingObserver {
   StreamSubscription<geo.Position>? _distanceTrackingStream;
   bool _isTrackingDistance = false;
   Timer? _distanceUpdateTimer;
+  Key _mapWidgetKey = UniqueKey();
 
   // Distance tracking constants
   static const double _minimumDistanceThreshold = 5.0; // meters
@@ -63,6 +64,18 @@ class _MainscreenState extends State<Mainscreen> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    userpositionStream?.cancel();
+    _distanceTrackingStream?.cancel();
+    _distanceUpdateTimer?.cancel();
+
+    // Dispose controllers
+    _searchController.dispose();
+    _searchNavigationController.dispose();
+
+    // Clear map-related objects
+    pointAnnotationManager = null;
+    polylineAnnotationManager = null;
+    _mapboxMap = null;
     WidgetsBinding.instance.removeObserver(this);
     _cleanupResources();
     super.dispose();
@@ -70,12 +83,19 @@ class _MainscreenState extends State<Mainscreen> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    print("📱 App lifecycle state changed: $state");
+
     switch (state) {
       case AppLifecycleState.paused:
         _pauseLocationTracking();
         break;
       case AppLifecycleState.resumed:
         _resumeLocationTracking();
+        // Check if map needs to be recreated after resume
+        if (_mapboxMap == null && mounted) {
+          print("🔄 Map lost after resume, recreating...");
+          _recreateMapWidget();
+        }
         break;
       case AppLifecycleState.detached:
         _cleanupResources();
@@ -1200,11 +1220,15 @@ class _MainscreenState extends State<Mainscreen> with WidgetsBindingObserver {
           MapAnimationOptions(duration: 1000),
         );
       }
+      if (mounted) {
+        setState(() {
+          _isMapReady = true;
+        });
+      }
 
-      _isMapReady = true;
       print("✅ Map fully initialized and ready");
     } catch (e) {
-      _handleError('Error initializing map', e);
+      _handleMapError('Error initializing map', e);
     }
   }
 
@@ -1420,10 +1444,7 @@ class _MainscreenState extends State<Mainscreen> with WidgetsBindingObserver {
     return Stack(
       children: [
         // Map widget
-        MapWidget(
-          key: const ValueKey("mapWidget"),
-          onMapCreated: _onMapCreated,
-        ),
+        MapWidget(key: _mapWidgetKey, onMapCreated: _onMapCreated),
 
         // Distance tracking indicator
         _buildDistanceTrackingIndicator(),
@@ -1522,6 +1543,33 @@ class _MainscreenState extends State<Mainscreen> with WidgetsBindingObserver {
         ),
       ],
     );
+  }
+
+  void _recreateMapWidget() {
+    if (mounted) {
+      setState(() {
+        _mapWidgetKey = UniqueKey();
+        _isMapReady = false;
+        _mapboxMap = null;
+        pointAnnotationManager = null;
+        polylineAnnotationManager = null;
+      });
+    }
+  }
+
+  void _handleMapError(String message, dynamic error) {
+    print('❌ Map Error - $message: $error');
+
+    // If it's a platform view error, try to recreate the map
+    if (error.toString().contains('platform view') ||
+        error.toString().contains('already created')) {
+      print('🔄 Attempting to recreate map widget...');
+      _recreateMapWidget();
+    }
+
+    if (mounted) {
+      _showErrorSnackBar('$message: ${error.toString().split('\n').first}');
+    }
   }
 
   // Get list of pages

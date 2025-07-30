@@ -3,9 +3,10 @@ import 'package:flutter/foundation.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:map/pages/sign_up_page.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 class LoginScreen extends StatefulWidget {
+  const LoginScreen({super.key});
+
   @override
   _LoginScreenState createState() => _LoginScreenState();
 }
@@ -19,13 +20,52 @@ class _LoginScreenState extends State<LoginScreen> {
   bool _isFacebookLoading = false;
   bool _obscurePassword = true;
 
+  // Fixed redirect URLs for different platforms
+  String get _redirectUrl {
+    if (kIsWeb) {
+      // For web, use the current origin + callback path
+      final uri = Uri.base;
+      return '${uri.origin}/auth/callback';
+    } else {
+      // For mobile, use your custom scheme (make sure this matches your app config)
+      return 'com.example.mapapp://login-callback/';
+    }
+  }
+
   final SupabaseClient supabase = Supabase.instance.client;
+
+  @override
+  void initState() {
+    super.initState();
+    // Handle deep links when the screen initializes
+    _handleIncomingLinks();
+  }
 
   @override
   void dispose() {
     _emailController.dispose();
     _passwordController.dispose();
     super.dispose();
+  }
+
+  void _handleIncomingLinks() {
+    // Handle the initial link if the app was launched from a deep link
+    try {
+      final uri = Uri.base;
+      if (uri.fragment.isNotEmpty || uri.queryParameters.isNotEmpty) {
+        debugPrint('🔗 Handling incoming deep link: $uri');
+        supabase.auth
+            .getSessionFromUrl(uri)
+            .then((_) {
+              debugPrint('✅ Deep link session processed');
+            })
+            .catchError((error) {
+              debugPrint('❌ Error processing deep link: $error');
+            });
+      }
+    } catch (error) {
+      debugPrint('❌ Error handling incoming links: $error');
+    }
   }
 
   Future<void> _logIn() async {
@@ -41,23 +81,29 @@ class _LoginScreenState extends State<LoginScreen> {
       final email = _emailController.text.trim();
       final password = _passwordController.text;
 
+      debugPrint('🔄 Attempting login for: $email');
+
       final response = await supabase.auth.signInWithPassword(
         email: email,
         password: password,
       );
 
-      if (mounted) {
-        if (response.user != null) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('Logged in successfully!'),
-              backgroundColor: Colors.green,
-            ),
-          );
-          // AuthWrapper will handle navigation automatically
-        }
+      debugPrint('✅ Login response received');
+      debugPrint('   - User: ${response.user?.email}');
+      debugPrint('   - Session: ${response.session != null}');
+
+      if (mounted && response.user != null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Logged in successfully!'),
+            backgroundColor: Colors.green,
+          ),
+        );
+        // AuthWrapper will automatically handle the navigation
+        debugPrint('✅ Login successful, AuthWrapper should handle navigation');
       }
     } on AuthException catch (error) {
+      debugPrint('❌ Auth error during login: ${error.message}');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -67,6 +113,7 @@ class _LoginScreenState extends State<LoginScreen> {
         );
       }
     } catch (error) {
+      debugPrint('❌ Unexpected error during login: $error');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -90,18 +137,18 @@ class _LoginScreenState extends State<LoginScreen> {
     });
 
     try {
+      debugPrint('🔄 Starting Google OAuth...');
+      debugPrint('   - Redirect URL: $_redirectUrl');
+
       await supabase.auth.signInWithOAuth(
         OAuthProvider.google,
-        redirectTo:
-            kIsWeb ? null : 'io.supabase.flutterquickstart://login-callback/',
-        authScreenLaunchMode:
-            kIsWeb
-                ? LaunchMode.platformDefault
-                : LaunchMode.externalApplication,
+        redirectTo: _redirectUrl,
+        authScreenLaunchMode: LaunchMode.externalApplication,
       );
 
-      // AuthWrapper will handle the success state and navigation
+      debugPrint('✅ Google OAuth initiated');
     } on AuthException catch (error) {
+      debugPrint('❌ Google OAuth error: ${error.message}');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -111,6 +158,7 @@ class _LoginScreenState extends State<LoginScreen> {
         );
       }
     } catch (error) {
+      debugPrint('❌ Unexpected error during Google OAuth: $error');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -134,18 +182,18 @@ class _LoginScreenState extends State<LoginScreen> {
     });
 
     try {
+      debugPrint('🔄 Starting Facebook OAuth...');
+      debugPrint('   - Redirect URL: $_redirectUrl');
+
       await supabase.auth.signInWithOAuth(
         OAuthProvider.facebook,
-        redirectTo:
-            kIsWeb ? null : 'io.supabase.flutterquickstart://login-callback/',
-        authScreenLaunchMode:
-            kIsWeb
-                ? LaunchMode.platformDefault
-                : LaunchMode.externalApplication,
+        redirectTo: _redirectUrl,
+        authScreenLaunchMode: LaunchMode.externalApplication,
       );
 
-      // AuthWrapper will handle the success state and navigation
+      debugPrint('✅ Facebook OAuth initiated');
     } on AuthException catch (error) {
+      debugPrint('❌ Facebook OAuth error: ${error.message}');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -155,6 +203,7 @@ class _LoginScreenState extends State<LoginScreen> {
         );
       }
     } catch (error) {
+      debugPrint('❌ Unexpected error during Facebook OAuth: $error');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -487,17 +536,6 @@ class _LoginScreenState extends State<LoginScreen> {
                       fillColor: Colors.grey[50],
                     ),
                     keyboardType: TextInputType.emailAddress,
-                    validator: (value) {
-                      if (value == null || value.isEmpty) {
-                        return 'Please enter your email';
-                      }
-                      if (!RegExp(
-                        r'^[\w-\.]+@([\w-]+\.)+[\w-]{2,4}$',
-                      ).hasMatch(value)) {
-                        return 'Please enter a valid email';
-                      }
-                      return null;
-                    },
                   ),
                 ],
               ),
