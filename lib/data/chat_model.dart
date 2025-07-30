@@ -22,21 +22,57 @@ class ChatUser {
     this.createdAt,
   });
 
+  // For users fetched from Supabase
+  factory ChatUser.fromSupabase(Map<String, dynamic> data) {
+    return ChatUser(
+      id: data['id'],
+      username: data['username'] ?? '',
+      email: data['email'] ?? '${data['username']}@example.com',
+      name: data['name'] ?? data['display_name'] ?? data['username'] ?? '',
+      avatarUrl: data['avatar_url'],
+      isOnline: data['is_online'] ?? false,
+      lastSeen: _parseDateTime(data['last_seen']),
+      createdAt: _parseDateTime(data['created_at']),
+    );
+  }
+
+  // For backward compatibility with Firebase
   factory ChatUser.fromFirestore(DocumentSnapshot doc) {
     final data = doc.data() as Map<String, dynamic>;
     return ChatUser(
       id: doc.id,
-      username: data['username'],
+      username: data['username'] ?? data['email']?.split('@')[0] ?? '',
       email: data['email'] ?? '',
-      name: data['name'] ?? '',
+      name: data['name'] ?? data['display_name'] ?? '',
       avatarUrl: data['avatar_url'],
       isOnline: data['is_online'] ?? false,
-      lastSeen: data['last_seen']?.toDate(),
-      createdAt: data['created_at']?.toDate(),
+      lastSeen: _parseDateTime(data['last_seen']),
+      createdAt: _parseDateTime(data['created_at']),
     );
   }
 
-  String get displayName => name.isNotEmpty ? name : email.split('@')[0];
+  static DateTime? _parseDateTime(dynamic dateValue) {
+    if (dateValue == null) return null;
+    if (dateValue is String) {
+      try {
+        return DateTime.parse(dateValue);
+      } catch (e) {
+        print('Error parsing date: $dateValue - $e');
+        return null;
+      }
+    }
+    if (dateValue is DateTime) return dateValue;
+    try {
+      return dateValue.toDate(); // Firestore Timestamp
+    } catch (e) {
+      return null;
+    }
+  }
+
+  String get displayName =>
+      name.isNotEmpty
+          ? name
+          : (username.isNotEmpty ? username : email.split('@')[0]);
 
   String get onlineStatus {
     if (isOnline) return 'Online';
@@ -52,62 +88,123 @@ class ChatUser {
 
     return 'Last seen ${lastSeen!.day}/${lastSeen!.month}';
   }
+
+  Map<String, dynamic> toSupabase() {
+    return {
+      'username': username,
+      'email': email,
+      'name': name,
+      'avatar_url': avatarUrl,
+      'is_online': isOnline,
+      'last_seen': lastSeen?.toIso8601String(),
+      'created_at': createdAt?.toIso8601String(),
+    };
+  }
 }
 
 class ChatMessage {
   final String id;
+  final String chatId;
   final String senderId;
   final String senderEmail;
   final String senderName;
   final String message;
   final String? imageUrl;
-  final DateTime? timestamp;
+  final DateTime? createdAt;
+  final DateTime? updatedAt;
   final List<String> readBy;
 
   ChatMessage({
     required this.id,
+    required this.chatId,
     required this.senderId,
     required this.senderEmail,
     required this.senderName,
     required this.message,
     this.imageUrl,
-    this.timestamp,
+    this.createdAt,
+    this.updatedAt,
     required this.readBy,
   });
 
+  // For messages from Supabase
+  factory ChatMessage.fromSupabase(Map<String, dynamic> data) {
+    return ChatMessage(
+      id: data['id'],
+      chatId: data['chat_id'],
+      senderId: data['sender_id'],
+      senderEmail: data['sender_email'] ?? '',
+      senderName: data['sender_name'] ?? '',
+      message: data['message'] ?? '',
+      imageUrl: data['image_url'],
+      createdAt: _parseDateTime(data['created_at']),
+      updatedAt: _parseDateTime(data['updated_at']),
+      readBy: List<String>.from(data['read_by'] ?? []),
+    );
+  }
+
+  // For backward compatibility with Firebase
   factory ChatMessage.fromFirestore(DocumentSnapshot doc) {
     final data = doc.data() as Map<String, dynamic>;
     return ChatMessage(
       id: doc.id,
+      chatId: '', // Not stored in Firebase message
       senderId: data['sender_id'] ?? '',
       senderEmail: data['sender_email'] ?? '',
       senderName: data['sender_name'] ?? '',
       message: data['message'] ?? '',
       imageUrl: data['image_url'],
-      timestamp: data['timestamp']?.toDate(),
+      createdAt: _parseDateTime(data['timestamp']),
+      updatedAt: _parseDateTime(data['updated_at']),
       readBy: List<String>.from(data['read_by'] ?? []),
     );
+  }
+
+  static DateTime? _parseDateTime(dynamic dateValue) {
+    if (dateValue == null) return null;
+    if (dateValue is String) {
+      try {
+        return DateTime.parse(dateValue);
+      } catch (e) {
+        return null;
+      }
+    }
+    if (dateValue is DateTime) return dateValue;
+    try {
+      return dateValue.toDate(); // Firestore Timestamp
+    } catch (e) {
+      return null;
+    }
   }
 
   bool isReadBy(String userId) => readBy.contains(userId);
 
   String get timeString {
-    if (timestamp == null) return '';
+    if (createdAt == null) return '';
 
     final now = DateTime.now();
-    final messageTime = timestamp!;
+    final messageTime = createdAt!;
 
     if (now.difference(messageTime).inDays == 0) {
-      // Same day - show time
       return '${messageTime.hour.toString().padLeft(2, '0')}:${messageTime.minute.toString().padLeft(2, '0')}';
     } else if (now.difference(messageTime).inDays < 7) {
-      // Within a week - show day
       const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
       return days[messageTime.weekday - 1];
     } else {
-      // Older - show date
       return '${messageTime.day}/${messageTime.month}';
     }
+  }
+
+  Map<String, dynamic> toSupabase() {
+    return {
+      'chat_id': chatId,
+      'sender_id': senderId,
+      'sender_email': senderEmail,
+      'sender_name': senderName,
+      'message': message,
+      'image_url': imageUrl,
+      'read_by': readBy,
+    };
   }
 }
 
@@ -118,6 +215,12 @@ class Chat {
   final DateTime? lastMessageTime;
   final String? lastSenderId;
   final DateTime? createdAt;
+  final DateTime? updatedAt;
+  final bool isGroup;
+  final String? groupName;
+  final String? groupDescription;
+  final List<String> groupAdminIds;
+  final String? groupId;
 
   Chat({
     required this.id,
@@ -126,22 +229,74 @@ class Chat {
     this.lastMessageTime,
     this.lastSenderId,
     this.createdAt,
+    this.updatedAt,
+    this.isGroup = false,
+    this.groupName,
+    this.groupDescription,
+    this.groupAdminIds = const [],
+    this.groupId,
   });
 
+  // For chats from Supabase
+  factory Chat.fromSupabase(Map<String, dynamic> data) {
+    return Chat(
+      id: data['id'],
+      participants: List<String>.from(data['participants'] ?? []),
+      lastMessage: data['last_message'],
+      lastMessageTime: _parseDateTime(data['last_message_time']),
+      lastSenderId: data['last_sender_id'],
+      createdAt: _parseDateTime(data['created_at']),
+      updatedAt: _parseDateTime(data['updated_at']),
+      isGroup: data['is_group'] ?? false,
+      groupName: data['group_name'],
+      groupDescription: data['group_description'],
+      groupAdminIds: List<String>.from(data['group_admin_ids'] ?? []),
+      groupId: data['group_id'],
+    );
+  }
+
+  // For backward compatibility with Firebase
   factory Chat.fromFirestore(DocumentSnapshot doc) {
     final data = doc.data() as Map<String, dynamic>;
     return Chat(
       id: doc.id,
       participants: List<String>.from(data['participants'] ?? []),
       lastMessage: data['last_message'],
-      lastMessageTime: data['last_message_time']?.toDate(),
+      lastMessageTime: _parseDateTime(data['last_message_time']),
       lastSenderId: data['last_sender_id'],
-      createdAt: data['created_at']?.toDate(),
+      createdAt: _parseDateTime(data['created_at']),
+      updatedAt: _parseDateTime(data['updated_at']),
+      isGroup: data['is_group'] ?? false,
+      groupName: data['group_name'],
+      groupDescription: data['group_description'],
+      groupAdminIds: List<String>.from(data['group_admin_ids'] ?? []),
+      groupId: data['supabase_group_id'],
     );
   }
 
-  String getOtherParticipantId(String currentUserId) {
-    return participants.firstWhere((id) => id != currentUserId);
+  static DateTime? _parseDateTime(dynamic dateValue) {
+    if (dateValue == null) return null;
+    if (dateValue is String) {
+      try {
+        return DateTime.parse(dateValue);
+      } catch (e) {
+        return null;
+      }
+    }
+    if (dateValue is DateTime) return dateValue;
+    try {
+      return dateValue.toDate(); // Firestore Timestamp
+    } catch (e) {
+      return null;
+    }
+  }
+
+  String? getOtherParticipantId(String currentUserId) {
+    try {
+      return participants.firstWhere((id) => id != currentUserId);
+    } catch (e) {
+      return participants.isNotEmpty ? participants.first : null;
+    }
   }
 
   String get lastMessageTimeString {
@@ -160,19 +315,23 @@ class Chat {
 
     return '${messageTime.day}/${messageTime.month}';
   }
-}
 
-extension ChatUserSupabase on ChatUser {
-  static ChatUser fromSupabase(Map<String, dynamic> data) {
-    return ChatUser(
-      id: data['id'],
-      username: data['username'],
-      email: '${data['username']}@example.com', // Placeholder
-      name: data['username'], // Using username as name
-      avatarUrl: data['avatar_url'],
-      isOnline: false,
-      lastSeen: null,
-      createdAt: null,
-    );
+  String get displayName {
+    if (isGroup) return groupName ?? 'Group Chat';
+    return 'Direct Chat';
+  }
+
+  Map<String, dynamic> toSupabase() {
+    return {
+      'participants': participants,
+      'last_message': lastMessage,
+      'last_message_time': lastMessageTime?.toIso8601String(),
+      'last_sender_id': lastSenderId,
+      'is_group': isGroup,
+      'group_name': groupName,
+      'group_description': groupDescription,
+      'group_admin_ids': groupAdminIds,
+      'group_id': groupId,
+    };
   }
 }

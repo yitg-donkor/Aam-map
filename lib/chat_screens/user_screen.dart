@@ -1,10 +1,9 @@
-// lib/screens/user_search_screen.dart
+// lib/chat_screens/user_search_screen.dart
 import 'package:flutter/material.dart';
 import 'package:map/data/chat_model.dart';
-import 'package:map/services/messaging_services.dart';
-import 'package:rxdart/rxdart.dart';
 
-import 'chat_screen.dart';
+import 'package:map/chat_screens/chat_screen.dart';
+import 'package:map/services/supabse_messaging_service.dart';
 
 class UserSearchScreen extends StatefulWidget {
   const UserSearchScreen({super.key});
@@ -13,156 +12,98 @@ class UserSearchScreen extends StatefulWidget {
   State<UserSearchScreen> createState() => _UserSearchScreenState();
 }
 
-class _UserSearchScreenState extends State<UserSearchScreen>
-    with TickerProviderStateMixin {
+class _UserSearchScreenState extends State<UserSearchScreen> {
   final TextEditingController _searchController = TextEditingController();
-  final TextEditingController _groupNameController = TextEditingController();
-  final TextEditingController _groupDescriptionController =
-      TextEditingController();
-
-  final BehaviorSubject<String> _searchSubject = BehaviorSubject<String>();
-
   List<ChatUser> _searchResults = [];
-  List<ChatUser> _selectedUsers = [];
   bool _isSearching = false;
-  bool _isCreatingChat = false;
-
-  late TabController _tabController;
-
-  @override
-  void initState() {
-    super.initState();
-    _tabController = TabController(length: 2, vsync: this);
-
-    // Setup debounced search
-    _searchSubject
-        .debounceTime(const Duration(milliseconds: 300))
-        .distinct()
-        .listen(_performSearch);
-  }
+  bool _hasSearched = false;
+  String _searchQuery = '';
 
   @override
   void dispose() {
     _searchController.dispose();
-    _groupNameController.dispose();
-    _groupDescriptionController.dispose();
-    _searchSubject.close();
-    _tabController.dispose();
     super.dispose();
   }
 
-  void _performSearch(String query) async {
-    if (query.length < 2) {
+  Future<void> _searchUsers(String query) async {
+    if (query.trim().isEmpty) {
       setState(() {
         _searchResults = [];
-        _isSearching = false;
+        _hasSearched = false;
+        _searchQuery = '';
       });
       return;
     }
 
-    setState(() => _isSearching = true);
+    setState(() {
+      _isSearching = true;
+      _searchQuery = query;
+    });
 
     try {
-      final results = await MessagingService.searchUsers(query);
+      final results = await SupabaseMessagingService.searchUsers(query.trim());
       setState(() {
         _searchResults = results;
+        _hasSearched = true;
         _isSearching = false;
       });
     } catch (e) {
       setState(() {
         _searchResults = [];
+        _hasSearched = true;
         _isSearching = false;
       });
+
       if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Search error: $e')));
-      }
-    }
-  }
-
-  void _onSearchChanged(String value) {
-    _searchSubject.add(value);
-  }
-
-  void _selectUser(ChatUser user) {
-    if (_tabController.index == 1) {
-      // Group mode
-      setState(() {
-        if (!_selectedUsers.any((u) => u.id == user.id)) {
-          _selectedUsers.add(user);
-        }
-      });
-    } else {
-      // Direct message mode
-      _startDirectMessage(user);
-    }
-  }
-
-  void _removeSelectedUser(ChatUser user) {
-    setState(() {
-      _selectedUsers.removeWhere((u) => u.id == user.id);
-    });
-  }
-
-  void _startDirectMessage(ChatUser user) async {
-    setState(() => _isCreatingChat = true);
-
-    try {
-      final chatId = await MessagingService.createDirectConversation(user);
-      if (mounted) {
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(
-            builder: (context) => ChatScreen(chatId: chatId, otherUser: user),
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error searching users: $e'),
+            backgroundColor: Colors.red,
           ),
         );
       }
-    } catch (e) {
-      if (mounted) {
-        setState(() => _isCreatingChat = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error starting conversation: $e')),
-        );
-      }
     }
   }
 
-  void _createGroupChat() async {
-    if (_groupNameController.text.trim().isEmpty || _selectedUsers.isEmpty) {
-      return;
-    }
-
-    setState(() => _isCreatingChat = true);
-
+  Future<void> _startChatWithUser(ChatUser user) async {
     try {
-      final chatId = await MessagingService.createGroupChat(
-        groupName: _groupNameController.text.trim(),
-        description:
-            _groupDescriptionController.text.trim().isEmpty
-                ? null
-                : _groupDescriptionController.text.trim(),
-        members: _selectedUsers,
+      // Show loading indicator
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => const Center(child: CircularProgressIndicator()),
+      );
+
+      // Create or get existing conversation
+      final chatId = await SupabaseMessagingService.createDirectConversation(
+        user,
       );
 
       if (mounted) {
-        Navigator.pushReplacement(
-          context,
+        // Close loading dialog
+        Navigator.of(context).pop();
+
+        // Navigate to chat screen
+        Navigator.of(context).push(
           MaterialPageRoute(
             builder:
-                (context) => ChatScreen(
-                  chatId: chatId,
-                  otherUser: null, // Group chat
-                ),
+                (context) =>
+                    ChatScreen(chatId: chatId, otherUser: user, isGroup: false),
+            settings: RouteSettings(name: '/chat/$chatId'),
           ),
         );
       }
     } catch (e) {
       if (mounted) {
-        setState(() => _isCreatingChat = false);
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Error creating group: $e')));
+        // Close loading dialog
+        Navigator.of(context).pop();
+
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error starting chat: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
       }
     }
   }
@@ -171,237 +112,282 @@ class _UserSearchScreenState extends State<UserSearchScreen>
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
+        title: const Text('Find People'),
         backgroundColor: Colors.blue,
         foregroundColor: Colors.white,
-        title: const Text('New Message'),
-        bottom: TabBar(
-          controller: _tabController,
-          indicatorColor: Colors.white,
-          labelColor: Colors.white,
-          unselectedLabelColor: Colors.white70,
-          onTap: (index) {
-            setState(() {
-              _selectedUsers.clear();
-              _searchController.clear();
-              _searchResults.clear();
-              _groupNameController.clear();
-              _groupDescriptionController.clear();
-            });
-          },
-          tabs: const [Tab(text: 'Direct Message'), Tab(text: 'Group Chat')],
-        ),
+        elevation: 2,
       ),
       body: Column(
         children: [
-          // Search bar
-          Padding(
-            padding: const EdgeInsets.all(16.0),
-            child: TextField(
-              controller: _searchController,
-              onChanged: _onSearchChanged,
-              decoration: InputDecoration(
-                hintText: 'Search users by username...',
-                prefixIcon: const Icon(Icons.search),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(25),
+          // Search header
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.grey.withOpacity(0.1),
+                  spreadRadius: 1,
+                  blurRadius: 3,
+                  offset: const Offset(0, 1),
                 ),
-                filled: true,
-                fillColor: Colors.grey[100],
-              ),
+              ],
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Search for people to start a conversation',
+                  style: TextStyle(fontSize: 16, color: Colors.grey),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: _searchController,
+                  decoration: InputDecoration(
+                    hintText: 'Enter username or email...',
+                    prefixIcon: const Icon(Icons.search),
+                    suffixIcon:
+                        _searchController.text.isNotEmpty
+                            ? IconButton(
+                              icon: const Icon(Icons.clear),
+                              onPressed: () {
+                                _searchController.clear();
+                                _searchUsers('');
+                              },
+                            )
+                            : null,
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(25),
+                      borderSide: BorderSide(color: Colors.grey.shade300),
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(25),
+                      borderSide: const BorderSide(
+                        color: Colors.blue,
+                        width: 2,
+                      ),
+                    ),
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 20,
+                      vertical: 16,
+                    ),
+                  ),
+                  onChanged: (value) {
+                    // Debounce search
+                    Future.delayed(const Duration(milliseconds: 500), () {
+                      if (_searchController.text == value) {
+                        _searchUsers(value);
+                      }
+                    });
+                  },
+                  onSubmitted: _searchUsers,
+                ),
+              ],
             ),
           ),
-
-          // Selected users (group mode)
-          if (_tabController.index == 1 && _selectedUsers.isNotEmpty)
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16.0),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'Selected Users:',
-                    style: TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  const SizedBox(height: 8),
-                  Wrap(
-                    spacing: 8,
-                    children:
-                        _selectedUsers
-                            .map(
-                              (user) => Chip(
-                                avatar: CircleAvatar(
-                                  backgroundImage:
-                                      user.avatarUrl != null
-                                          ? NetworkImage(user.avatarUrl!)
-                                          : null,
-                                  backgroundColor: Colors.blue,
-                                  child:
-                                      user.avatarUrl == null
-                                          ? Text(
-                                            user.displayName
-                                                .substring(0, 1)
-                                                .toUpperCase(),
-                                            style: const TextStyle(
-                                              color: Colors.white,
-                                              fontSize: 12,
-                                            ),
-                                          )
-                                          : null,
-                                ),
-                                label: Text(user.displayName),
-                                onDeleted: () => _removeSelectedUser(user),
-                              ),
-                            )
-                            .toList(),
-                  ),
-                  const SizedBox(height: 16),
-                ],
-              ),
-            ),
-
-          // Group creation form
-          if (_tabController.index == 1)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16.0),
-              child: Column(
-                children: [
-                  TextField(
-                    controller: _groupNameController,
-                    decoration: InputDecoration(
-                      hintText: 'Group name',
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                      filled: true,
-                      fillColor: Colors.grey[100],
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  TextField(
-                    controller: _groupDescriptionController,
-                    decoration: InputDecoration(
-                      hintText: 'Group description (optional)',
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                      filled: true,
-                      fillColor: Colors.grey[100],
-                    ),
-                    maxLines: 2,
-                  ),
-                  const SizedBox(height: 8),
-                  SizedBox(
-                    width: double.infinity,
-                    child: ElevatedButton(
-                      onPressed:
-                          _groupNameController.text.trim().isNotEmpty &&
-                                  _selectedUsers.isNotEmpty &&
-                                  !_isCreatingChat
-                              ? _createGroupChat
-                              : null,
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.blue,
-                        foregroundColor: Colors.white,
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                      ),
-                      child:
-                          _isCreatingChat
-                              ? const CircularProgressIndicator(
-                                color: Colors.white,
-                              )
-                              : const Text('Create Group'),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                ],
-              ),
-            ),
 
           // Search results
-          Expanded(
-            child:
-                _isSearching
-                    ? const Center(child: CircularProgressIndicator())
-                    : _searchResults.isEmpty &&
-                        _searchController.text.length >= 2
-                    ? const Center(
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Icon(Icons.search_off, size: 64, color: Colors.grey),
-                          SizedBox(height: 16),
-                          Text(
-                            'No users found',
-                            style: TextStyle(color: Colors.grey),
-                          ),
-                        ],
-                      ),
-                    )
-                    : _searchController.text.length < 2
-                    ? const Center(
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Icon(
-                            Icons.people_outline,
-                            size: 64,
-                            color: Colors.grey,
-                          ),
-                          SizedBox(height: 16),
-                          Text(
-                            'Search for users to start messaging',
-                            style: TextStyle(color: Colors.grey),
-                          ),
-                        ],
-                      ),
-                    )
-                    : ListView.builder(
-                      itemCount: _searchResults.length,
-                      itemBuilder: (context, index) {
-                        final user = _searchResults[index];
-                        final isSelected = _selectedUsers.any(
-                          (u) => u.id == user.id,
-                        );
+          Expanded(child: _buildSearchResults()),
+        ],
+      ),
+    );
+  }
 
-                        return ListTile(
-                          leading: CircleAvatar(
-                            backgroundImage:
-                                user.avatarUrl != null
-                                    ? NetworkImage(user.avatarUrl!)
-                                    : null,
-                            backgroundColor: Colors.blue,
-                            child:
-                                user.avatarUrl == null
-                                    ? Text(
-                                      user.displayName
-                                          .substring(0, 1)
-                                          .toUpperCase(),
-                                      style: const TextStyle(
-                                        color: Colors.white,
-                                      ),
-                                    )
-                                    : null,
-                          ),
-                          title: Text(user.displayName),
-                          subtitle: Text('@${user.username}'),
-                          trailing:
-                              _tabController.index == 1 && isSelected
-                                  ? const Icon(
-                                    Icons.check_circle,
-                                    color: Colors.green,
-                                  )
-                                  : _tabController.index == 0
-                                  ? const Icon(Icons.message_outlined)
-                                  : null,
-                          onTap:
-                              _isCreatingChat ? null : () => _selectUser(user),
-                        );
-                      },
-                    ),
+  Widget _buildSearchResults() {
+    if (_isSearching) {
+      return const Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            CircularProgressIndicator(),
+            SizedBox(height: 16),
+            Text(
+              'Searching for users...',
+              style: TextStyle(fontSize: 16, color: Colors.grey),
+            ),
+          ],
+        ),
+      );
+    }
+
+    if (!_hasSearched) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(32),
+              decoration: BoxDecoration(
+                color: Colors.blue.withOpacity(0.1),
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(Icons.search, size: 64, color: Colors.blue),
+            ),
+            const SizedBox(height: 24),
+            const Text(
+              'Search for people',
+              style: TextStyle(
+                fontSize: 24,
+                fontWeight: FontWeight.bold,
+                color: Colors.grey,
+              ),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Enter a username or email to find people',
+              style: TextStyle(fontSize: 16, color: Colors.grey),
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ),
+      );
+    }
+
+    if (_searchResults.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Icon(Icons.person_search, size: 64, color: Colors.grey),
+            const SizedBox(height: 16),
+            const Text(
+              'No users found',
+              style: TextStyle(
+                fontSize: 20,
+                fontWeight: FontWeight.bold,
+                color: Colors.grey,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'No users found for "$_searchQuery"',
+              style: const TextStyle(fontSize: 16, color: Colors.grey),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 16),
+            TextButton.icon(
+              onPressed: () {
+                _searchController.clear();
+                _searchUsers('');
+              },
+              icon: const Icon(Icons.refresh),
+              label: const Text('Try a different search'),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return ListView.builder(
+      padding: const EdgeInsets.all(8),
+      itemCount: _searchResults.length,
+      itemBuilder: (context, index) {
+        final user = _searchResults[index];
+        return _buildUserTile(user);
+      },
+    );
+  }
+
+  Widget _buildUserTile(ChatUser user) {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(12),
+        color: Colors.white,
+        boxShadow: [
+          BoxShadow(
+            color: Colors.grey.withOpacity(0.1),
+            spreadRadius: 1,
+            blurRadius: 3,
+            offset: const Offset(0, 1),
           ),
         ],
+      ),
+      child: ListTile(
+        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        leading: Stack(
+          children: [
+            Hero(
+              tag: 'avatar_${user.id}',
+              child: CircleAvatar(
+                radius: 28,
+                backgroundColor: Colors.blue,
+                backgroundImage:
+                    user.avatarUrl != null
+                        ? NetworkImage(user.avatarUrl!)
+                        : null,
+                child:
+                    user.avatarUrl == null
+                        ? Text(
+                          user.displayName.substring(0, 1).toUpperCase(),
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 18,
+                          ),
+                        )
+                        : null,
+              ),
+            ),
+            if (user.isOnline)
+              Positioned(
+                bottom: 2,
+                right: 2,
+                child: Container(
+                  width: 14,
+                  height: 14,
+                  decoration: BoxDecoration(
+                    color: Colors.green,
+                    shape: BoxShape.circle,
+                    border: Border.all(color: Colors.white, width: 2),
+                  ),
+                ),
+              ),
+          ],
+        ),
+        title: Text(
+          user.displayName,
+          style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 16),
+        ),
+        subtitle: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const SizedBox(height: 4),
+            Text(
+              '@${user.username}',
+              style: TextStyle(color: Colors.grey[600], fontSize: 14),
+            ),
+            if (user.email.isNotEmpty) ...[
+              const SizedBox(height: 2),
+              Text(
+                user.email,
+                style: TextStyle(color: Colors.grey[500], fontSize: 12),
+              ),
+            ],
+            const SizedBox(height: 4),
+            Text(
+              user.onlineStatus,
+              style: TextStyle(
+                color: user.isOnline ? Colors.green[600] : Colors.grey[500],
+                fontSize: 12,
+                fontWeight: user.isOnline ? FontWeight.w500 : FontWeight.normal,
+              ),
+            ),
+          ],
+        ),
+        trailing: ElevatedButton(
+          onPressed: () => _startChatWithUser(user),
+          style: ElevatedButton.styleFrom(
+            backgroundColor: Colors.blue,
+            foregroundColor: Colors.white,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(20),
+            ),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          ),
+          child: const Text('Chat', style: TextStyle(fontSize: 12)),
+        ),
+        onTap: () => _startChatWithUser(user),
       ),
     );
   }
