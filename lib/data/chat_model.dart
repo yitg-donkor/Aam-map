@@ -113,6 +113,7 @@ class ChatMessage {
   final DateTime? createdAt;
   final DateTime? updatedAt;
   final List<String> readBy;
+  final bool isOptimistic; // New field for optimistic updates
 
   ChatMessage({
     required this.id,
@@ -125,6 +126,7 @@ class ChatMessage {
     this.createdAt,
     this.updatedAt,
     required this.readBy,
+    this.isOptimistic = false, // Default to false
   });
 
   // For messages from Supabase
@@ -140,6 +142,7 @@ class ChatMessage {
       createdAt: _parseDateTime(data['created_at']),
       updatedAt: _parseDateTime(data['updated_at']),
       readBy: List<String>.from(data['read_by'] ?? []),
+      isOptimistic: false, // Server messages are never optimistic
     );
   }
 
@@ -157,6 +160,7 @@ class ChatMessage {
       createdAt: _parseDateTime(data['timestamp']),
       updatedAt: _parseDateTime(data['updated_at']),
       readBy: List<String>.from(data['read_by'] ?? []),
+      isOptimistic: false, // Firebase messages are never optimistic
     );
   }
 
@@ -195,6 +199,35 @@ class ChatMessage {
     }
   }
 
+  // Create a copy of the message with updated fields
+  ChatMessage copyWith({
+    String? id,
+    String? chatId,
+    String? senderId,
+    String? senderEmail,
+    String? senderName,
+    String? message,
+    String? imageUrl,
+    DateTime? createdAt,
+    DateTime? updatedAt,
+    List<String>? readBy,
+    bool? isOptimistic,
+  }) {
+    return ChatMessage(
+      id: id ?? this.id,
+      chatId: chatId ?? this.chatId,
+      senderId: senderId ?? this.senderId,
+      senderEmail: senderEmail ?? this.senderEmail,
+      senderName: senderName ?? this.senderName,
+      message: message ?? this.message,
+      imageUrl: imageUrl ?? this.imageUrl,
+      createdAt: createdAt ?? this.createdAt,
+      updatedAt: updatedAt ?? this.updatedAt,
+      readBy: readBy ?? this.readBy,
+      isOptimistic: isOptimistic ?? this.isOptimistic,
+    );
+  }
+
   Map<String, dynamic> toSupabase() {
     return {
       'chat_id': chatId,
@@ -204,6 +237,7 @@ class ChatMessage {
       'message': message,
       'image_url': imageUrl,
       'read_by': readBy,
+      // Note: isOptimistic is not saved to database as it's UI-only
     };
   }
 }
@@ -243,7 +277,9 @@ class Chat {
       id: data['id'],
       participants: List<String>.from(data['participants'] ?? []),
       lastMessage: data['last_message'],
-      lastMessageTime: _parseDateTime(data['last_message_time']),
+      lastMessageTime:
+          _parseDateTime(data['last_message_time']) ??
+          _parseDateTime(data['last_message_at']),
       lastSenderId: data['last_sender_id'],
       createdAt: _parseDateTime(data['created_at']),
       updatedAt: _parseDateTime(data['updated_at']),

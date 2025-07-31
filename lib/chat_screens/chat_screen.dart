@@ -319,18 +319,39 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       );
     }
 
-    return ListView.builder(
-      controller: _scrollController,
-      reverse: true,
-      padding: const EdgeInsets.all(8),
-      itemCount: _messages.length,
-      itemBuilder: (context, index) {
-        final message = _messages[index];
-        final isMyMessage =
-            message.senderId == SupabaseMessagingService.currentUserId;
-        final showSenderInfo = widget.isGroup && !isMyMessage;
+    return StreamBuilder<List<ChatMessage>>(
+      stream: SupabaseMessagingService.getMessagesStream(widget.chatId),
+      builder: (context, snapshot) {
+        if (snapshot.hasData) {
+          _messages = snapshot.data!;
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (_scrollController.hasClients) {
+              _scrollController.animateTo(
+                0,
+                duration: Duration(milliseconds: 300),
+                curve: Curves.easeOut,
+              );
+            }
+          });
+        }
+        if (_isLoading) {
+          return Center(child: CircularProgressIndicator());
+        }
 
-        return _buildMessageBubble(message, isMyMessage, showSenderInfo);
+        return ListView.builder(
+          controller: _scrollController,
+          reverse: true,
+          padding: const EdgeInsets.all(8),
+          itemCount: _messages.length,
+          itemBuilder: (context, index) {
+            final message = _messages[index];
+            final isMyMessage =
+                message.senderId == SupabaseMessagingService.currentUserId;
+            final showSenderInfo = widget.isGroup && !isMyMessage;
+
+            return _buildMessageBubble(message, isMyMessage, showSenderInfo);
+          },
+        );
       },
     );
   }

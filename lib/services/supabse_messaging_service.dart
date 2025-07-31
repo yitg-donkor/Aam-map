@@ -1,4 +1,5 @@
 // lib/services/supabase_messaging_service.dart
+import 'dart:async';
 import 'dart:io';
 import 'package:map/data/chat_model.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -249,7 +250,50 @@ class SupabaseMessagingService {
     });
   }
 
-  // Send message
+  // Send message with optimistic UI update
+  static Future<ChatMessage> sendMessageOptimistic({
+    required String chatId,
+    required String message,
+    String? imageUrl,
+    Function(ChatMessage)? onOptimisticUpdate,
+  }) async {
+    ChatMessage? optimisticMessage;
+
+    try {
+      final currentUser = await getCurrentUser();
+      if (currentUser == null) throw Exception('User not authenticated');
+
+      // Create optimistic message for immediate UI update
+      if (onOptimisticUpdate != null) {
+        optimisticMessage = ChatMessage(
+          id: 'temp_${DateTime.now().millisecondsSinceEpoch}', // Temporary ID
+          chatId: chatId,
+          senderId: currentUser.id,
+          senderEmail: currentUser.email,
+          senderName: currentUser.displayName,
+          message: message,
+          imageUrl: imageUrl,
+          createdAt: DateTime.now(),
+          readBy: [currentUser.id],
+          isOptimistic: true, // Flag to indicate this is optimistic
+        );
+        onOptimisticUpdate(optimisticMessage);
+      }
+
+      // Send the actual message
+      final sentMessage = await sendMessage(
+        chatId: chatId,
+        message: message,
+        imageUrl: imageUrl,
+      );
+
+      return sentMessage;
+    } catch (e) {
+      print('Error sending message: $e');
+      throw e;
+    }
+  }
+
   static Future<ChatMessage> sendMessage({
     required String chatId,
     required String message,
@@ -258,6 +302,8 @@ class SupabaseMessagingService {
     try {
       final currentUser = await getCurrentUser();
       if (currentUser == null) throw Exception('User not authenticated');
+
+      final now = DateTime.now().toIso8601String();
 
       final response =
           await _supabase
@@ -270,7 +316,7 @@ class SupabaseMessagingService {
                 'message': message,
                 'image_url': imageUrl,
                 'read_by': [currentUser.id], // Mark as read by sender
-                'created_at': DateTime.now().toIso8601String(),
+                'created_at': now,
               })
               .select()
               .single();
@@ -278,7 +324,12 @@ class SupabaseMessagingService {
       // Update chat's updated_at timestamp
       await _supabase
           .from('chats')
-          .update({'updated_at': DateTime.now().toIso8601String()})
+          .update({
+            'updated_at': now,
+            'last_message': message,
+            'last_message_time': now,
+            'last_sender_id': currentUser.id,
+          })
           .eq('id', chatId);
 
       return ChatMessage.fromSupabase(response);
@@ -310,26 +361,113 @@ class SupabaseMessagingService {
     }
   }
 
-  // Real-time stream for messages in a chat
+  // Real-time stream for messages in a chat with better reliability
   static Stream<List<ChatMessage>> getMessagesStream(String chatId) {
-    return _supabase.from('messages').stream(primaryKey: ['id']).map((data) {
-      // Filter messages for this chat
-      final filteredMessages =
-          data.where((json) => json['chat_id'] == chatId).toList();
+    // Create a broadcast stream controller for better control
+    late StreamController<List<ChatMessage>> controller;
+    RealtimeChannel? channel;
 
-      // Sort by created_at descending (newest first)
-      filteredMessages.sort((a, b) {
-        final aCreated =
-            DateTime.tryParse(a['created_at'] ?? '') ?? DateTime.now();
-        final bCreated =
-            DateTime.tryParse(b['created_at'] ?? '') ?? DateTime.now();
-        return bCreated.compareTo(aCreated);
-      });
+    controller = StreamController<List<ChatMessage>>.broadcast(
+      onListen: () async {
+        // First, get initial messages
+        try {
+          final initialMessages = await getMessages(chatId);
+          if (!controller.isClosed) {
+            controller.add(initialMessages);
+          }
+        } catch (e) {
+          if (!controller.isClosed) {
+            controller.addError(e);
+          }
+        }
 
-      return filteredMessages
-          .map((json) => ChatMessage.fromSupabase(json))
-          .toList();
-    });
+        // Then set up real-time subscription
+        channel = _supabase.channel('messages_$chatId');
+
+        // Listen for new messages
+        channel!.onPostgresChanges(
+          event: PostgresChangeEvent.insert,
+          schema: 'public',
+          table: 'messages',
+          filter: PostgresChangeFilter(
+            type: PostgresChangeFilterType.eq,
+            column: 'chat_id',
+            value: chatId,
+          ),
+          callback: (payload) async {
+            try {
+              // Refresh the entire message list to ensure proper ordering
+              final updatedMessages = await getMessages(chatId);
+              if (!controller.isClosed) {
+                controller.add(updatedMessages);
+              }
+            } catch (e) {
+              if (!controller.isClosed) {
+                controller.addError(e);
+              }
+            }
+          },
+        );
+
+        // Listen for message updates
+        channel!.onPostgresChanges(
+          event: PostgresChangeEvent.update,
+          schema: 'public',
+          table: 'messages',
+          filter: PostgresChangeFilter(
+            type: PostgresChangeFilterType.eq,
+            column: 'chat_id',
+            value: chatId,
+          ),
+          callback: (payload) async {
+            try {
+              final updatedMessages = await getMessages(chatId);
+              if (!controller.isClosed) {
+                controller.add(updatedMessages);
+              }
+            } catch (e) {
+              if (!controller.isClosed) {
+                controller.addError(e);
+              }
+            }
+          },
+        );
+
+        // Listen for message deletions
+        channel!.onPostgresChanges(
+          event: PostgresChangeEvent.delete,
+          schema: 'public',
+          table: 'messages',
+          filter: PostgresChangeFilter(
+            type: PostgresChangeFilterType.eq,
+            column: 'chat_id',
+            value: chatId,
+          ),
+          callback: (payload) async {
+            try {
+              final updatedMessages = await getMessages(chatId);
+              if (!controller.isClosed) {
+                controller.add(updatedMessages);
+              }
+            } catch (e) {
+              if (!controller.isClosed) {
+                controller.addError(e);
+              }
+            }
+          },
+        );
+
+        await channel!.subscribe();
+      },
+      onCancel: () async {
+        if (channel != null) {
+          await channel!.unsubscribe();
+        }
+        await controller.close();
+      },
+    );
+
+    return controller.stream;
   }
 
   // Mark messages as read
