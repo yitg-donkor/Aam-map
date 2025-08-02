@@ -132,10 +132,15 @@ class SupabaseMessagingService {
     required String groupName,
     String? description,
     required List<ChatUser> members,
+    bool isPrivate = false,
   }) async {
     try {
       final currentUserId = _supabase.auth.currentUser?.id;
       if (currentUserId == null) throw Exception('User not authenticated');
+      String? joinCode;
+      if (!isPrivate) {
+        joinCode = _generateJoinCode();
+      }
 
       // Create group in groups table first
       final groupResponse =
@@ -145,6 +150,8 @@ class SupabaseMessagingService {
                 'name': groupName,
                 'description': description,
                 'created_by': currentUserId,
+                'is_Private': isPrivate,
+                'join_code': joinCode,
                 'created_at': DateTime.now().toIso8601String(),
               })
               .select()
@@ -187,6 +194,234 @@ class SupabaseMessagingService {
     } catch (e) {
       print('Error creating group chat: $e');
       throw e;
+    }
+  }
+
+  static String _generateJoinCode() {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    return List.generate(
+      8,
+      (index) =>
+          chars[(DateTime.now().microsecondsSinceEpoch + index) % chars.length],
+    ).join();
+  }
+
+  //search public groups
+  static Future<List<Chat>> searchPublicGroups(String query) async {
+    if (query.length < 2) return [];
+    try {
+      final response = await _supabase
+          .from('chats')
+          .select('*')
+          .eq('is_group', true)
+          .eq('is_private', false)
+          .or('group_name.ilike.%$query%,group_description.ilike.%$query%')
+          .limit(20);
+
+      return (response as List).map((chatData) {
+        return Chat.fromSupabase(chatData);
+      }).toList();
+    } catch (e) {
+      print('Error searching public groups: $e');
+      return [];
+    }
+  }
+
+  //join group by code
+
+  static Future<String> joinGroupByCode(String joinCode) async {
+    try {
+      final currentUserId = _supabase.auth.currentUser?.id;
+      if (currentUserId == null) throw Exception('User not authenticated');
+
+      // Find group by join code
+      final chatResponse =
+          await _supabase
+              .from('chats')
+              .select('*')
+              .eq('join_code', joinCode.toUpperCase())
+              .eq('is_group', true)
+              .eq('is_private', false)
+              .single();
+
+      final chat = Chat.fromSupabase(chatResponse);
+
+      // Check if user is already a member
+      if (chat.participants.contains(currentUserId)) {
+        return chat.id; // Already a member
+      }
+
+      final updatedParticipants = [...chat.participants, currentUserId];
+      await _supabase
+          .from('chats')
+          .update({
+            'participants': updatedParticipants,
+            'updated_at': DateTime.now().toIso8601String(),
+          })
+          .eq('id', chat.id);
+
+      // Add to group_members
+      if (chat.groupId != null) {
+        await _supabase.from('group_members').insert({
+          'group_id': chat.groupId!,
+          'user_id': currentUserId,
+          'role': 'member',
+          'joined_at': DateTime.now().toIso8601String(),
+        });
+      }
+      return chat.id;
+    } catch (e) {
+      print('Error joining group by code: $e');
+      throw Exception('Invalid join code or group not found');
+    }
+  }
+
+  // Send invitation to private group
+  static Future<void> sendGroupInvitation({
+    required String chatId,
+    required String userId,
+  }) async {
+    try {
+      final currentUserId = _supabase.auth.currentUser?.id;
+      if (currentUserId == null) throw Exception('User not authenticated');
+
+      final chat = await getChatById(chatId);
+      if (chat == null || !chat.isGroup) {
+        throw Exception('Chat not found or not a group');
+      }
+
+      // Check if current user is admin
+      if (!chat.groupAdminIds.contains(currentUserId)) {
+        throw Exception('Only admins can send invitations');
+      }
+
+      // Check if user is already a member
+      if (chat.participants.contains(userId)) {
+        throw Exception('User is already a member');
+      }
+
+      // Create invitation
+      await _supabase.from('group_invitations').insert({
+        'group_id': chat.groupId,
+        'chat_id': chatId,
+        'invited_user_id': userId,
+        'invited_by': currentUserId,
+        'status': 'pending',
+        'created_at': DateTime.now().toIso8601String(),
+      });
+
+      // TODO: Send notification to user about invitation
+    } catch (e) {
+      print('Error sending group invitation: $e');
+      throw e;
+    }
+  }
+
+  // Accept group invitation
+  static Future<String> acceptGroupInvitation(String invitationId) async {
+    try {
+      final currentUserId = _supabase.auth.currentUser?.id;
+      if (currentUserId == null) throw Exception('User not authenticated');
+
+      // Get invitation details
+      final invitationResponse =
+          await _supabase
+              .from('group_invitations')
+              .select('*')
+              .eq('id', invitationId)
+              .eq('invited_user_id', currentUserId)
+              .eq('status', 'pending')
+              .single();
+
+      final chatId = invitationResponse['chat_id'];
+      final groupId = invitationResponse['group_id'];
+
+      // Get chat details
+      final chat = await getChatById(chatId);
+      if (chat == null) throw Exception('Chat not found');
+
+      // Add user to chat participants
+      final updatedParticipants = [...chat.participants, currentUserId];
+
+      await _supabase
+          .from('chats')
+          .update({
+            'participants': updatedParticipants,
+            'updated_at': DateTime.now().toIso8601String(),
+          })
+          .eq('id', chatId);
+
+      // Add to group_members
+      await _supabase.from('group_members').insert({
+        'group_id': groupId,
+        'user_id': currentUserId,
+        'role': 'member',
+        'joined_at': DateTime.now().toIso8601String(),
+      });
+
+      // Update invitation status
+      await _supabase
+          .from('group_invitations')
+          .update({
+            'status': 'accepted',
+            'responded_at': DateTime.now().toIso8601String(),
+          })
+          .eq('id', invitationId);
+
+      return chatId;
+    } catch (e) {
+      print('Error accepting group invitation: $e');
+      throw e;
+    }
+  }
+
+  static Future<String?> uploadMessageImage(
+    String filePath,
+    String fileName,
+  ) async {
+    try {
+      final currentUserId = _supabase.auth.currentUser?.id;
+      if (currentUserId == null) throw Exception('User not authenticated');
+      final String path =
+          'messages/images/$currentUserId/${DateTime.now().millisecondsSinceEpoch}_$fileName';
+
+      await _supabase.storage.from('chat-media').upload(path, File(filePath));
+
+      final String publicUrl = _supabase.storage
+          .from('chat-media')
+          .getPublicUrl(path);
+      return publicUrl;
+    } catch (e) {
+      print('Error uploading message image: $e');
+      return null;
+    }
+  }
+
+  //upload message document
+  static Future<String?> uploadMessageDocument(
+    String filePath,
+    String fileName,
+  ) async {
+    try {
+      final currentUserId = _supabase.auth.currentUser?.id;
+
+      if (currentUserId == null) throw Exception('User not authenticated');
+
+      final String path =
+          'messages/documents/$currentUserId/${DateTime.now().millisecondsSinceEpoch}_$fileName';
+      print('Uploading document to path: $path');
+
+      await _supabase.storage.from('chat-media').upload(path, File(filePath));
+
+      final String publicUrl = _supabase.storage
+          .from('chat-media')
+          .getPublicUrl(path);
+      print('Generated public URL: $publicUrl'); // Debug print
+
+      return publicUrl;
+    } catch (e) {
+      print('Error uploading message document: $e');
+      return null;
     }
   }
 
@@ -255,6 +490,9 @@ class SupabaseMessagingService {
     required String chatId,
     required String message,
     String? imageUrl,
+    String? documentUrl,
+    String? documentName,
+
     Function(ChatMessage)? onOptimisticUpdate,
   }) async {
     ChatMessage? optimisticMessage;
@@ -273,6 +511,8 @@ class SupabaseMessagingService {
           senderName: currentUser.displayName,
           message: message,
           imageUrl: imageUrl,
+          documentUrl: documentUrl,
+          documentName: documentName,
           createdAt: DateTime.now(),
           readBy: [currentUser.id],
           isOptimistic: true, // Flag to indicate this is optimistic
@@ -285,6 +525,8 @@ class SupabaseMessagingService {
         chatId: chatId,
         message: message,
         imageUrl: imageUrl,
+        documentName: documentName,
+        documentUrl: documentUrl,
       );
 
       return sentMessage;
@@ -298,6 +540,8 @@ class SupabaseMessagingService {
     required String chatId,
     required String message,
     String? imageUrl,
+    String? documentUrl,
+    String? documentName,
   }) async {
     try {
       final currentUser = await getCurrentUser();
@@ -315,6 +559,8 @@ class SupabaseMessagingService {
                 'sender_name': currentUser.displayName,
                 'message': message,
                 'image_url': imageUrl,
+                'document_url': documentUrl,
+                'document_name': documentName,
                 'read_by': [currentUser.id], // Mark as read by sender
                 'created_at': now,
               })
@@ -471,12 +717,13 @@ class SupabaseMessagingService {
   }
 
   // Mark messages as read
+
   static Future<void> markMessagesAsRead(String chatId) async {
     try {
       final currentUserId = _supabase.auth.currentUser?.id;
       if (currentUserId == null) return;
 
-      // Get unread messages
+      // Get unread messages - messages where current user is NOT in the read_by array
       final unreadMessages = await _supabase
           .from('messages')
           .select('id, read_by')
@@ -487,38 +734,101 @@ class SupabaseMessagingService {
             '{$currentUserId}',
           ); // Messages not read by current user
 
-      // Update read_by array for each message
+      if (unreadMessages.isEmpty) {
+        print('No unread messages found for chat: $chatId');
+        return;
+      }
+
+      print('Found ${unreadMessages.length} unread messages to mark as read');
+
+      // Update read_by array for each unread message
+      final List<Future<void>> updateFutures = [];
+
       for (final messageData in unreadMessages) {
+        final messageId = messageData['id'];
         final readBy = List<String>.from(messageData['read_by'] ?? []);
+
         if (!readBy.contains(currentUserId)) {
           readBy.add(currentUserId);
 
-          await _supabase
+          // Update the messages table
+          final updateFuture = _supabase
               .from('messages')
               .update({'read_by': readBy})
-              .eq('id', messageData['id']);
+              .eq('id', messageId);
+
+          updateFutures.add(updateFuture);
         }
       }
 
-      // Also insert into message_reads table for better tracking
-      final messageReads =
-          unreadMessages
-              .map(
-                (msg) => {
-                  'message_id': msg['id'],
-                  'user_id': currentUserId,
-                  'read_at': DateTime.now().toIso8601String(),
-                },
-              )
-              .toList();
-
-      if (messageReads.isNotEmpty) {
-        await _supabase
-            .from('message_reads')
-            .upsert(messageReads, onConflict: 'message_id,user_id');
+      // Execute all updates
+      if (updateFutures.isNotEmpty) {
+        await Future.wait(updateFutures);
+        print('Successfully updated ${updateFutures.length} messages as read');
       }
+
+      // Handle message_reads table with UPSERT to avoid duplicates
+      await _insertMessageReads(
+        unreadMessages.map((msg) => msg['id']).toList(),
+        currentUserId,
+      );
     } catch (e) {
       print('Error marking messages as read: $e');
+      // Don't throw the error to avoid breaking the UI
+    }
+  }
+
+  // Helper method to safely insert into message_reads table
+  static Future<void> _insertMessageReads(
+    List<dynamic> messageIds,
+    String userId,
+  ) async {
+    try {
+      if (messageIds.isEmpty) return;
+
+      // Check which message reads already exist
+      final existingReads = await _supabase
+          .from('message_reads')
+          .select('message_id')
+          .eq('user_id', userId)
+          .inFilter('message_id', messageIds);
+
+      final existingMessageIds =
+          existingReads.map((read) => read['message_id'] as String).toSet();
+
+      // Only insert reads for messages that don't already have reads
+      final newMessageIds =
+          messageIds.where((id) => !existingMessageIds.contains(id)).toList();
+
+      if (newMessageIds.isNotEmpty) {
+        final messageReads =
+            newMessageIds
+                .map(
+                  (messageId) => {
+                    'message_id': messageId,
+                    'user_id': userId,
+                    'read_at': DateTime.now().toIso8601String(),
+                  },
+                )
+                .toList();
+
+        // Use upsert with onConflict to handle any race conditions
+        await _supabase
+            .from('message_reads')
+            .upsert(
+              messageReads,
+              onConflict: 'message_id,user_id',
+              ignoreDuplicates:
+                  true, // This will ignore conflicts instead of throwing errors
+            );
+
+        print(
+          'Successfully inserted ${newMessageIds.length} new message reads',
+        );
+      }
+    } catch (e) {
+      print('Error inserting message reads: $e');
+      // Don't throw - this is supplementary data
     }
   }
 
@@ -831,6 +1141,57 @@ class SupabaseMessagingService {
     }
   }
 
+  static Future<void> markSpecificMessageAsRead(String messageId) async {
+    try {
+      final currentUserId = _supabase.auth.currentUser?.id;
+      if (currentUserId == null) return;
+
+      // Get the current message
+      final messageResponse =
+          await _supabase
+              .from('messages')
+              .select('read_by')
+              .eq('id', messageId)
+              .single();
+
+      final readBy = List<String>.from(messageResponse['read_by'] ?? []);
+
+      if (!readBy.contains(currentUserId)) {
+        readBy.add(currentUserId);
+
+        // Update the message
+        await _supabase
+            .from('messages')
+            .update({'read_by': readBy})
+            .eq('id', messageId);
+
+        // Insert into message_reads with conflict handling
+        await _supabase
+            .from('message_reads')
+            .upsert(
+              {
+                'message_id': messageId,
+                'user_id': currentUserId,
+                'read_at': DateTime.now().toIso8601String(),
+              },
+              onConflict: 'message_id,user_id',
+              ignoreDuplicates: true,
+            );
+      }
+    } catch (e) {
+      print('Error marking specific message as read: $e');
+    }
+  }
+
+  static Future<void> cleanupOrphanedMessageReads() async {
+    try {
+      // This removes message_reads entries for messages that no longer exist
+      await _supabase.rpc('cleanup_orphaned_message_reads');
+    } catch (e) {
+      print('Error cleaning up orphaned message reads: $e');
+    }
+  }
+
   // Search messages in a chat
   static Future<List<ChatMessage>> searchMessages(
     String chatId,
@@ -869,33 +1230,6 @@ class SupabaseMessagingService {
       return ChatMessage.fromSupabase(response);
     } catch (e) {
       print('Error getting message by ID: $e');
-      return null;
-    }
-  }
-
-  // Upload image for message
-  static Future<String?> uploadMessageImage(
-    String filePath,
-    String fileName,
-  ) async {
-    try {
-      final currentUserId = _supabase.auth.currentUser?.id;
-      if (currentUserId == null) throw Exception('User not authenticated');
-
-      final String path =
-          'messages/$currentUserId/${DateTime.now().millisecondsSinceEpoch}_$fileName';
-
-      await _supabase.storage
-          .from('message-images')
-          .upload(path, File(filePath));
-
-      final String publicUrl = _supabase.storage
-          .from('message-images')
-          .getPublicUrl(path);
-
-      return publicUrl;
-    } catch (e) {
-      print('Error uploading message image: $e');
       return null;
     }
   }

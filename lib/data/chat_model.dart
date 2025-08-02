@@ -27,7 +27,7 @@ class ChatUser {
     return ChatUser(
       id: data['id'],
       username: data['username'] ?? '',
-      email: data['email'] ?? '${data['username']}@example.com',
+      email: data['email'] ?? '${data['username']}',
       name: data['name'] ?? data['display_name'] ?? data['username'] ?? '',
       avatarUrl: data['avatar_url'],
       isOnline: data['is_online'] ?? false,
@@ -113,7 +113,9 @@ class ChatMessage {
   final DateTime? createdAt;
   final DateTime? updatedAt;
   final List<String> readBy;
-  final bool isOptimistic; // New field for optimistic updates
+  final bool isOptimistic;
+  final String? documentUrl;
+  final String? documentName;
 
   ChatMessage({
     required this.id,
@@ -125,6 +127,8 @@ class ChatMessage {
     this.imageUrl,
     this.createdAt,
     this.updatedAt,
+    this.documentUrl,
+    this.documentName,
     required this.readBy,
     this.isOptimistic = false, // Default to false
   });
@@ -139,6 +143,8 @@ class ChatMessage {
       senderName: data['sender_name'] ?? '',
       message: data['message'] ?? '',
       imageUrl: data['image_url'],
+      documentUrl: data['document_url'],
+      documentName: data['document_name'],
       createdAt: _parseDateTime(data['created_at']),
       updatedAt: _parseDateTime(data['updated_at']),
       readBy: List<String>.from(data['read_by'] ?? []),
@@ -157,6 +163,8 @@ class ChatMessage {
       senderName: data['sender_name'] ?? '',
       message: data['message'] ?? '',
       imageUrl: data['image_url'],
+      documentUrl: data['document_url'],
+      documentName: data['document_name'],
       createdAt: _parseDateTime(data['timestamp']),
       updatedAt: _parseDateTime(data['updated_at']),
       readBy: List<String>.from(data['read_by'] ?? []),
@@ -208,6 +216,8 @@ class ChatMessage {
     String? senderName,
     String? message,
     String? imageUrl,
+    String? documentUrl,
+    String? documentName,
     DateTime? createdAt,
     DateTime? updatedAt,
     List<String>? readBy,
@@ -221,6 +231,8 @@ class ChatMessage {
       senderName: senderName ?? this.senderName,
       message: message ?? this.message,
       imageUrl: imageUrl ?? this.imageUrl,
+      documentUrl: documentUrl ?? this.documentUrl,
+      documentName: documentName ?? this.documentName,
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
       readBy: readBy ?? this.readBy,
@@ -236,6 +248,8 @@ class ChatMessage {
       'sender_name': senderName,
       'message': message,
       'image_url': imageUrl,
+      'documentu_rl': documentUrl,
+      'document_name': documentName,
       'read_by': readBy,
       // Note: isOptimistic is not saved to database as it's UI-only
     };
