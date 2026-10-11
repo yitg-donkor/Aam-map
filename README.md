@@ -1,5 +1,19 @@
 # map
 
+## Environment configuration
+
+Create a `.env` file in the project root (next to `pubspec.yaml`) with these
+keys:
+
+```dotenv
+MAPBOX_ACCESS_TOKEN=your_mapbox_access_token
+SUPABASE_URL=your_supabase_project_url
+SUPABASE_ANON_KEY=your_supabase_anon_key
+```
+
+The `.env` file is loaded as a Flutter asset during startup. Keep real
+credentials private and do not commit them to a public repository.
+
 A new Flutter project.
 
 ## Getting Started
