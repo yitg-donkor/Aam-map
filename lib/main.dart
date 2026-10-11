@@ -31,7 +31,14 @@ Future<void> main() async {
     rethrow;
   }
   final accessToken = dotenv.get('MAPBOX_ACCESS_TOKEN');
-  MapboxOptions.setAccessToken(accessToken);
+  if (kIsWeb) {
+    MapboxOptions.setAccessToken(
+      const String.fromEnvironment('MAPBOX_ACCESS_TOKEN'),
+    );
+  } else {
+    MapboxOptions.setAccessToken(dotenv.env['MAPBOX_ACCESS_TOKEN']!);
+  }
+
   await Supabase.initialize(
     url: dotenv.get('SUPABASE_URL'),
     anonKey: dotenv.get('SUPABASE_ANON_KEY'),
