@@ -368,15 +368,7 @@ class _MainscreenState extends State<Mainscreen> with WidgetsBindingObserver {
         data: imageData,
       );
 
-      await _mapboxMap!.style.addStyleImage(
-        imageId,
-        scale,
-        mbxImage,
-        false,
-        [],
-        [],
-        null,
-      );
+      await _mapboxMap!.style.addStyleImage(imageId, scale, mbxImage);
 
       print(
         "✅ Custom image '$imageId' loaded successfully (${decodedImage.width}x${decodedImage.height})",
